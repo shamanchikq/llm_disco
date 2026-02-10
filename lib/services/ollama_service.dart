@@ -2,13 +2,33 @@ import 'dart:convert';
 import 'package:http/http.dart' as http;
 import '../models/chat_message.dart';
 
+class ChatStreamEvent {
+  final String? contentToken;
+  final String? thinkingToken;
+  final List<Map<String, dynamic>>? toolCalls;
+  final bool done;
+
+  const ChatStreamEvent({
+    this.contentToken,
+    this.thinkingToken,
+    this.toolCalls,
+    this.done = false,
+  });
+}
+
 class OllamaService {
   final String baseUrl;
   http.Client? _activeClient;
 
   OllamaService(this.baseUrl);
 
-  Stream<String> streamChat(String model, List<ChatMessage> messages) async* {
+  Stream<ChatStreamEvent> streamChat(
+    String model,
+    List<ChatMessage> messages, {
+    bool? think,
+    String? thinkingLevel,
+    List<Map<String, dynamic>>? tools,
+  }) async* {
     _activeClient = http.Client();
     try {
       final request = http.Request(
@@ -16,17 +36,28 @@ class OllamaService {
         Uri.parse('$baseUrl/api/chat'),
       );
       request.headers['Content-Type'] = 'application/json';
-      request.body = jsonEncode({
+
+      final body = <String, dynamic>{
         'model': model,
         'messages': messages.map((m) => m.toApiMap()).toList(),
         'stream': true,
-      });
+      };
+
+      if (think == true) {
+        body['think'] = true;
+      }
+
+      if (tools != null && tools.isNotEmpty) {
+        body['tools'] = tools;
+      }
+
+      request.body = jsonEncode(body);
 
       final response = await _activeClient!.send(request);
 
       if (response.statusCode != 200) {
-        final body = await response.stream.bytesToString();
-        throw Exception('HTTP ${response.statusCode}: $body');
+        final responseBody = await response.stream.bytesToString();
+        throw Exception('HTTP ${response.statusCode}: $responseBody');
       }
 
       await for (final chunk in response.stream
@@ -36,11 +67,30 @@ class OllamaService {
         try {
           final json = jsonDecode(chunk) as Map<String, dynamic>;
           final message = json['message'] as Map<String, dynamic>?;
+          final isDone = json['done'] as bool? ?? false;
+
           if (message != null) {
             final content = message['content'] as String? ?? '';
-            if (content.isNotEmpty) {
-              yield content;
+            final thinking = message['thinking'] as String?;
+            final rawToolCalls = message['tool_calls'] as List<dynamic>?;
+
+            List<Map<String, dynamic>>? parsedToolCalls;
+            if (rawToolCalls != null && rawToolCalls.isNotEmpty) {
+              parsedToolCalls = rawToolCalls
+                  .map((e) => Map<String, dynamic>.from(e as Map))
+                  .toList();
             }
+
+            yield ChatStreamEvent(
+              contentToken: content.isNotEmpty ? content : null,
+              thinkingToken: thinking != null && thinking.isNotEmpty
+                  ? thinking
+                  : null,
+              toolCalls: parsedToolCalls,
+              done: isDone,
+            );
+          } else if (isDone) {
+            yield const ChatStreamEvent(done: true);
           }
         } catch (_) {
           // skip malformed JSON lines
@@ -66,6 +116,44 @@ class OllamaService {
           .toList();
     } else {
       throw Exception('Failed to fetch models: HTTP ${response.statusCode}');
+    }
+  }
+
+  Future<Map<String, dynamic>> fetchModelInfo(String model) async {
+    final response = await http.post(
+      Uri.parse('$baseUrl/api/show'),
+      headers: {'Content-Type': 'application/json'},
+      body: jsonEncode({'model': model}),
+    ).timeout(const Duration(seconds: 10));
+
+    if (response.statusCode == 200) {
+      return jsonDecode(response.body) as Map<String, dynamic>;
+    } else {
+      throw Exception(
+          'Failed to fetch model info: HTTP ${response.statusCode}');
+    }
+  }
+
+  Future<List<Map<String, dynamic>>> searchSearXNG(
+    String searxngUrl,
+    String query,
+  ) async {
+    final uri = Uri.parse(searxngUrl).replace(
+      path: '/search',
+      queryParameters: {'q': query, 'format': 'json'},
+    );
+
+    final response = await http.get(uri).timeout(const Duration(seconds: 15));
+
+    if (response.statusCode == 200) {
+      final data = jsonDecode(response.body) as Map<String, dynamic>;
+      final results = data['results'] as List<dynamic>? ?? [];
+      return results
+          .take(5)
+          .map((r) => Map<String, dynamic>.from(r as Map))
+          .toList();
+    } else {
+      throw Exception('SearXNG search failed: HTTP ${response.statusCode}');
     }
   }
 
