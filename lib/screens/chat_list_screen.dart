@@ -1,11 +1,15 @@
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
+import 'package:share_plus/share_plus.dart';
 import '../providers/chat_provider.dart';
 import '../providers/connection_provider.dart';
 import '../providers/model_provider.dart';
+import '../services/storage_service.dart';
 import '../widgets/model_selector.dart';
 import 'chat_screen.dart';
 import 'connection_screen.dart';
+import 'model_management_screen.dart';
 
 class ChatListScreen extends StatelessWidget {
   const ChatListScreen({super.key});
@@ -23,6 +27,19 @@ class ChatListScreen extends StatelessWidget {
         actions: [
           const ModelSelector(),
           const SizedBox(width: 4),
+          PopupMenuButton<String>(
+            icon: const Icon(Icons.more_vert),
+            onSelected: (value) =>
+                _onMenuAction(context, value, chatProvider),
+            itemBuilder: (_) => const [
+              PopupMenuItem(
+                  value: 'export_all', child: Text('Export All Chats')),
+              PopupMenuItem(
+                  value: 'import', child: Text('Import Chats')),
+              PopupMenuItem(
+                  value: 'manage_models', child: Text('Manage Models')),
+            ],
+          ),
           IconButton(
             icon: const Icon(Icons.logout),
             tooltip: 'Disconnect',
@@ -117,6 +134,10 @@ class ChatListScreen extends StatelessWidget {
                               builder: (_) => const ChatScreen()),
                         );
                       },
+                      onLongPress: () {
+                        _showConversationOptions(
+                            context, chatProvider, conversation);
+                      },
                       child: Container(
                         padding: const EdgeInsets.all(12),
                         decoration: BoxDecoration(
@@ -175,6 +196,137 @@ class ChatListScreen extends StatelessWidget {
                 );
               },
             ),
+    );
+  }
+
+  void _showConversationOptions(
+    BuildContext context,
+    ChatProvider chatProvider,
+    dynamic conversation,
+  ) {
+    final storage = StorageService();
+    showModalBottomSheet(
+      context: context,
+      builder: (ctx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              leading: const Icon(Icons.edit_outlined),
+              title: const Text('Rename'),
+              onTap: () {
+                Navigator.pop(ctx);
+                _showRenameDialog(context, chatProvider, conversation);
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.ios_share_outlined),
+              title: const Text('Export'),
+              onTap: () async {
+                Navigator.pop(ctx);
+                final messenger = ScaffoldMessenger.of(context);
+                try {
+                  final file =
+                      await storage.exportConversation(conversation);
+                  await Share.shareXFiles([XFile(file.path)]);
+                } catch (e) {
+                  messenger.showSnackBar(
+                      SnackBar(content: Text('Export failed: $e')));
+                }
+              },
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _onMenuAction(
+    BuildContext context,
+    String action,
+    ChatProvider chatProvider,
+  ) async {
+    final storage = StorageService();
+    final messenger = ScaffoldMessenger.of(context);
+    final navigator = Navigator.of(context);
+
+    switch (action) {
+      case 'export_all':
+        if (chatProvider.conversations.isEmpty) {
+          messenger.showSnackBar(
+              const SnackBar(content: Text('No conversations to export')));
+          return;
+        }
+        try {
+          final file = await storage
+              .exportAllConversations(chatProvider.conversations);
+          await Share.shareXFiles([XFile(file.path)]);
+        } catch (e) {
+          messenger
+              .showSnackBar(SnackBar(content: Text('Export failed: $e')));
+        }
+        break;
+      case 'import':
+        try {
+          final result = await FilePicker.platform.pickFiles(
+            type: FileType.custom,
+            allowedExtensions: ['json'],
+          );
+          if (result == null || result.files.single.path == null) return;
+          final imported =
+              await storage.importConversations(result.files.single.path!);
+          final count = chatProvider.importConversations(imported);
+          messenger.showSnackBar(SnackBar(
+              content: Text(count > 0
+                  ? 'Imported $count conversation${count == 1 ? '' : 's'}'
+                  : 'No new conversations to import')));
+        } catch (e) {
+          messenger
+              .showSnackBar(SnackBar(content: Text('Import failed: $e')));
+        }
+        break;
+      case 'manage_models':
+        navigator.push(
+            MaterialPageRoute(builder: (_) => const ModelManagementScreen()));
+        break;
+    }
+  }
+
+  void _showRenameDialog(
+    BuildContext context,
+    ChatProvider chatProvider,
+    dynamic conversation,
+  ) {
+    final controller = TextEditingController(text: conversation.title);
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Rename conversation'),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          decoration: const InputDecoration(hintText: 'Conversation title'),
+          onSubmitted: (_) {
+            chatProvider.renameConversation(
+                conversation.id, controller.text);
+            Navigator.pop(ctx);
+          },
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () {
+              chatProvider.renameConversation(
+                  conversation.id, controller.text);
+              Navigator.pop(ctx);
+            },
+            child: const Text('Save'),
+          ),
+        ],
+      ),
     );
   }
 }

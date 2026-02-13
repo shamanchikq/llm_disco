@@ -1,10 +1,12 @@
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
 import 'package:url_launcher/url_launcher.dart';
 import '../models/chat_message.dart';
 import '../theme/app_theme.dart';
+import 'code_block_builder.dart';
 
 class MessageBubble extends StatelessWidget {
   final ChatMessage message;
@@ -22,7 +24,17 @@ class MessageBubble extends StatelessWidget {
     if (isUser) {
       return Align(
         alignment: Alignment.centerRight,
-        child: Container(
+        child: GestureDetector(
+          onLongPress: () {
+            Clipboard.setData(ClipboardData(text: message.content));
+            ScaffoldMessenger.of(context)
+              ..clearSnackBars()
+              ..showSnackBar(const SnackBar(
+                content: Text('Copied to clipboard'),
+                duration: Duration(seconds: 1),
+              ));
+          },
+          child: Container(
           constraints: BoxConstraints(
             maxWidth: MediaQuery.of(context).size.width * 0.78,
           ),
@@ -59,6 +71,7 @@ class MessageBubble extends StatelessWidget {
             ],
           ),
         ),
+        ),
       );
     }
 
@@ -76,7 +89,6 @@ class MessageBubble extends StatelessWidget {
           mainAxisSize: MainAxisSize.min,
           children: [
             Row(
-              mainAxisSize: MainAxisSize.min,
               children: [
                 Icon(
                   Icons.auto_awesome,
@@ -92,6 +104,30 @@ class MessageBubble extends StatelessWidget {
                     fontWeight: FontWeight.w500,
                   ),
                 ),
+                const Spacer(),
+                if (message.content.isNotEmpty && !isError)
+                  SizedBox(
+                    width: 28,
+                    height: 28,
+                    child: IconButton(
+                      padding: EdgeInsets.zero,
+                      iconSize: 14,
+                      icon: Icon(
+                        Icons.copy_rounded,
+                        color: theme.colorScheme.primary.withValues(alpha: 0.5),
+                      ),
+                      onPressed: () {
+                        Clipboard.setData(
+                            ClipboardData(text: message.content));
+                        ScaffoldMessenger.of(context)
+                          ..clearSnackBars()
+                          ..showSnackBar(const SnackBar(
+                            content: Text('Copied to clipboard'),
+                            duration: Duration(seconds: 1),
+                          ));
+                      },
+                    ),
+                  ),
               ],
             ),
             const SizedBox(height: 4),
@@ -122,6 +158,7 @@ class MessageBubble extends StatelessWidget {
               MarkdownBody(
                 data: message.content,
                 selectable: true,
+                builders: {'pre': CodeBlockBuilder()},
                 onTapLink: (text, href, title) {
                   if (href != null) {
                     launchUrl(Uri.parse(href));

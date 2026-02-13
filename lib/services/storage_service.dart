@@ -37,6 +37,51 @@ class StorageService {
     }
   }
 
+  Future<File> exportConversation(Conversation conversation) async {
+    final dir = await getTemporaryDirectory();
+    final file = File('${dir.path}/conversation_${conversation.id}.json');
+    await file.writeAsString(jsonEncode(conversation.toJson()));
+    return file;
+  }
+
+  Future<File> exportAllConversations(List<Conversation> conversations) async {
+    final dir = await getTemporaryDirectory();
+    final file = File('${dir.path}/llm_disco_export.json');
+    final data = {
+      'version': 1,
+      'exportedAt': DateTime.now().toIso8601String(),
+      'conversations': conversations.map((c) => c.toJson()).toList(),
+    };
+    await file.writeAsString(jsonEncode(data));
+    return file;
+  }
+
+  Future<List<Conversation>> importConversations(String filePath) async {
+    final file = File(filePath);
+    final content = await file.readAsString();
+    final decoded = jsonDecode(content);
+
+    if (decoded is Map<String, dynamic>) {
+      if (decoded.containsKey('conversations')) {
+        // Wrapped format: { "version": 1, "conversations": [...] }
+        final list = decoded['conversations'] as List<dynamic>;
+        return list
+            .map((e) => Conversation.fromJson(e as Map<String, dynamic>))
+            .toList();
+      } else if (decoded.containsKey('id')) {
+        // Single conversation
+        return [Conversation.fromJson(decoded)];
+      }
+    } else if (decoded is List<dynamic>) {
+      // Raw list of conversations
+      return decoded
+          .map((e) => Conversation.fromJson(e as Map<String, dynamic>))
+          .toList();
+    }
+
+    throw const FormatException('Unrecognized export format');
+  }
+
   // Connection settings persistence
 
   static const _settingsFile = 'connection_settings.json';

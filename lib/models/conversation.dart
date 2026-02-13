@@ -9,6 +9,7 @@ class Conversation {
   bool thinkingEnabled;
   String? thinkingLevel;
   bool webSearchEnabled;
+  int? numCtx;
 
   Conversation({
     required this.id,
@@ -19,6 +20,7 @@ class Conversation {
     this.thinkingEnabled = false,
     this.thinkingLevel,
     this.webSearchEnabled = false,
+    this.numCtx,
   })  : title = title ?? 'New Chat',
         messages = messages ?? [],
         createdAt = createdAt ?? DateTime.now();
@@ -33,6 +35,7 @@ class Conversation {
       'thinkingEnabled': thinkingEnabled,
       'thinkingLevel': thinkingLevel,
       'webSearchEnabled': webSearchEnabled,
+      if (numCtx != null) 'numCtx': numCtx,
     };
   }
 
@@ -48,6 +51,7 @@ class Conversation {
       thinkingEnabled: json['thinkingEnabled'] as bool? ?? false,
       thinkingLevel: json['thinkingLevel'] as String?,
       webSearchEnabled: json['webSearchEnabled'] as bool? ?? false,
+      numCtx: json['numCtx'] as int?,
     );
   }
 }

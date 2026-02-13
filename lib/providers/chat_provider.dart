@@ -1,10 +1,13 @@
-import 'package:flutter/foundation.dart';
+import 'dart:async';
+
+import 'package:flutter/widgets.dart';
+
 import '../models/chat_message.dart';
 import '../models/conversation.dart';
 import '../services/ollama_service.dart';
 import '../services/storage_service.dart';
 
-class ChatProvider extends ChangeNotifier {
+class ChatProvider extends ChangeNotifier with WidgetsBindingObserver {
   OllamaService? _service;
   final List<Conversation> _conversations;
   final StorageService? _storageService;
@@ -12,18 +15,23 @@ class ChatProvider extends ChangeNotifier {
   bool _isStreaming = false;
   String? _pendingImageBase64;
   String? _searxngUrl;
+  Timer? _persistTimer;
+  double? _lastTokensPerSec;
 
   ChatProvider({
     StorageService? storageService,
     List<Conversation>? initialConversations,
   })  : _storageService = storageService,
-        _conversations = initialConversations ?? [];
+        _conversations = initialConversations ?? [] {
+    WidgetsBinding.instance.addObserver(this);
+  }
 
   List<Conversation> get conversations => List.unmodifiable(_conversations);
   Conversation? get activeConversation => _activeConversation;
   bool get isStreaming => _isStreaming;
   String? get pendingImageBase64 => _pendingImageBase64;
   String? get searxngUrl => _searxngUrl;
+  double? get lastTokensPerSec => _lastTokensPerSec;
 
   void setService(OllamaService service) {
     _service = service;
@@ -60,6 +68,33 @@ class ChatProvider extends ChangeNotifier {
     notifyListeners();
   }
 
+  void renameConversation(String id, String newTitle) {
+    final trimmed = newTitle.trim();
+    if (trimmed.isEmpty) return;
+    final conv = _conversations.where((c) => c.id == id).firstOrNull;
+    if (conv != null) {
+      conv.title = trimmed;
+      notifyListeners();
+      _persist();
+    }
+  }
+
+  int importConversations(List<Conversation> imported) {
+    final existingIds = _conversations.map((c) => c.id).toSet();
+    int added = 0;
+    for (final conv in imported) {
+      if (!existingIds.contains(conv.id)) {
+        _conversations.insert(0, conv);
+        added++;
+      }
+    }
+    if (added > 0) {
+      notifyListeners();
+      _persist();
+    }
+    return added;
+  }
+
   void deleteConversation(String id) {
     _conversations.removeWhere((c) => c.id == id);
     if (_activeConversation?.id == id) {
@@ -90,6 +125,7 @@ class ChatProvider extends ChangeNotifier {
           : content;
     }
 
+    _lastTokensPerSec = null;
     _isStreaming = true;
     notifyListeners();
 
@@ -103,6 +139,7 @@ class ChatProvider extends ChangeNotifier {
         }
       }
     } finally {
+      _cancelPersistTimer();
       _isStreaming = false;
       notifyListeners();
       _persist();
@@ -120,6 +157,8 @@ class ChatProvider extends ChangeNotifier {
     if (webSearchEnabled && _searxngUrl != null) {
       tools = [_webSearchToolDefinition()];
     }
+
+    _startPersistTimer();
 
     // Tool-calling loop: may iterate if model requests tool calls
     for (var iteration = 0; iteration < 5; iteration++) {
@@ -144,6 +183,7 @@ class ChatProvider extends ChangeNotifier {
         messagesToSend,
         think: thinkingEnabled ? true : null,
         tools: tools,
+        numCtx: conv.numCtx,
       )) {
         if (event.contentToken != null) {
           assistantMessage.content += event.contentToken!;
@@ -156,6 +196,10 @@ class ChatProvider extends ChangeNotifier {
         }
         if (event.toolCalls != null) {
           receivedToolCalls = event.toolCalls;
+        }
+        if (event.evalCount != null && event.evalDuration != null && event.evalDuration! > 0) {
+          _lastTokensPerSec = event.evalCount! / (event.evalDuration! / 1e9);
+          notifyListeners();
         }
       }
 
@@ -276,6 +320,33 @@ class ChatProvider extends ChangeNotifier {
     _isStreaming = false;
     _service = null;
     notifyListeners();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.paused ||
+        state == AppLifecycleState.inactive) {
+      _persist();
+    }
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _cancelPersistTimer();
+    super.dispose();
+  }
+
+  void _startPersistTimer() {
+    if (_persistTimer != null) return;
+    _persistTimer = Timer.periodic(const Duration(seconds: 2), (_) {
+      _persist();
+    });
+  }
+
+  void _cancelPersistTimer() {
+    _persistTimer?.cancel();
+    _persistTimer = null;
   }
 
   Future<void> _persist() async {

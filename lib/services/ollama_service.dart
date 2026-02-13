@@ -1,24 +1,49 @@
 import 'dart:convert';
 import 'package:http/http.dart' as http;
 import '../models/chat_message.dart';
+import '../models/ollama_search_result.dart';
 
 class ChatStreamEvent {
   final String? contentToken;
   final String? thinkingToken;
   final List<Map<String, dynamic>>? toolCalls;
   final bool done;
+  final int? evalCount;
+  final int? evalDuration;
 
   const ChatStreamEvent({
     this.contentToken,
     this.thinkingToken,
     this.toolCalls,
     this.done = false,
+    this.evalCount,
+    this.evalDuration,
   });
+}
+
+class PullProgressEvent {
+  final String status;
+  final String? digest;
+  final int? total;
+  final int? completed;
+
+  const PullProgressEvent({
+    required this.status,
+    this.digest,
+    this.total,
+    this.completed,
+  });
+
+  double? get progress =>
+      (total != null && total! > 0 && completed != null)
+          ? completed! / total!
+          : null;
 }
 
 class OllamaService {
   final String baseUrl;
   http.Client? _activeClient;
+  http.Client? _pullClient;
 
   OllamaService(this.baseUrl);
 
@@ -28,6 +53,7 @@ class OllamaService {
     bool? think,
     String? thinkingLevel,
     List<Map<String, dynamic>>? tools,
+    int? numCtx,
   }) async* {
     _activeClient = http.Client();
     try {
@@ -51,6 +77,10 @@ class OllamaService {
         body['tools'] = tools;
       }
 
+      if (numCtx != null) {
+        body['options'] = {'num_ctx': numCtx};
+      }
+
       request.body = jsonEncode(body);
 
       final response = await _activeClient!.send(request);
@@ -68,6 +98,9 @@ class OllamaService {
           final json = jsonDecode(chunk) as Map<String, dynamic>;
           final message = json['message'] as Map<String, dynamic>?;
           final isDone = json['done'] as bool? ?? false;
+
+          final evalCount = isDone ? json['eval_count'] as int? : null;
+          final evalDuration = isDone ? json['eval_duration'] as int? : null;
 
           if (message != null) {
             final content = message['content'] as String? ?? '';
@@ -88,9 +121,15 @@ class OllamaService {
                   : null,
               toolCalls: parsedToolCalls,
               done: isDone,
+              evalCount: evalCount,
+              evalDuration: evalDuration,
             );
           } else if (isDone) {
-            yield const ChatStreamEvent(done: true);
+            yield ChatStreamEvent(
+              done: true,
+              evalCount: evalCount,
+              evalDuration: evalDuration,
+            );
           }
         } catch (_) {
           // skip malformed JSON lines
@@ -166,6 +205,120 @@ class OllamaService {
     } catch (_) {
       return false;
     }
+  }
+
+  Stream<PullProgressEvent> pullModel(String modelName) async* {
+    _pullClient = http.Client();
+    try {
+      final request = http.Request(
+        'POST',
+        Uri.parse('$baseUrl/api/pull'),
+      );
+      request.headers['Content-Type'] = 'application/json';
+      request.body = jsonEncode({'model': modelName, 'stream': true});
+
+      final response = await _pullClient!.send(request);
+
+      if (response.statusCode != 200) {
+        final body = await response.stream.bytesToString();
+        throw Exception('HTTP ${response.statusCode}: $body');
+      }
+
+      await for (final chunk in response.stream
+          .transform(utf8.decoder)
+          .transform(const LineSplitter())) {
+        if (chunk.trim().isEmpty) continue;
+        try {
+          final json = jsonDecode(chunk) as Map<String, dynamic>;
+          yield PullProgressEvent(
+            status: json['status'] as String? ?? '',
+            digest: json['digest'] as String?,
+            total: json['total'] as int?,
+            completed: json['completed'] as int?,
+          );
+        } catch (_) {
+          // skip malformed lines
+        }
+      }
+    } finally {
+      _pullClient?.close();
+      _pullClient = null;
+    }
+  }
+
+  Future<void> deleteModel(String name) async {
+    final request = http.Request(
+      'DELETE',
+      Uri.parse('$baseUrl/api/delete'),
+    );
+    request.headers['Content-Type'] = 'application/json';
+    request.body = jsonEncode({'model': name});
+
+    final response = await http.Client().send(request);
+    final body = await response.stream.bytesToString();
+    if (response.statusCode != 200) {
+      throw Exception('Failed to delete model: HTTP ${response.statusCode}: $body');
+    }
+  }
+
+  Future<List<OllamaSearchResult>> searchOllamaCom(String query) async {
+    final uri = Uri.https('ollama.com', '/search', {'q': query});
+    final response = await http.get(uri).timeout(const Duration(seconds: 15));
+
+    if (response.statusCode != 200) {
+      throw Exception('Search failed: HTTP ${response.statusCode}');
+    }
+
+    final html = response.body;
+    final results = <OllamaSearchResult>[];
+
+    // Match model entries — each model is in an <a href="/library/..."> block
+    final blockPattern = RegExp(
+      r'<a[^>]*href="/library/([^"]+)"[^>]*>([\s\S]*?)</a>',
+    );
+
+    for (final match in blockPattern.allMatches(html)) {
+      final name = match.group(1) ?? '';
+      final block = match.group(2) ?? '';
+
+      // Extract description from <p> tags
+      String? description;
+      final descMatch = RegExp(r'<p[^>]*>(.*?)</p>').firstMatch(block);
+      if (descMatch != null) {
+        description = descMatch.group(1)?.replaceAll(RegExp(r'<[^>]+>'), '').trim();
+      }
+
+      // Extract pull count (e.g. "110M Pulls" or "1.2B Pulls")
+      String? pullCount;
+      final pullMatch = RegExp(r'([\d.]+[KMB]?)\s*Pull', caseSensitive: false).firstMatch(block);
+      if (pullMatch != null) {
+        pullCount = pullMatch.group(1);
+      }
+
+      // Extract tags from spans
+      final tags = <String>[];
+      final tagMatches = RegExp(r'<span[^>]*class="[^"]*tag[^"]*"[^>]*>(.*?)</span>').allMatches(block);
+      for (final tm in tagMatches) {
+        final tag = tm.group(1)?.replaceAll(RegExp(r'<[^>]+>'), '').trim();
+        if (tag != null && tag.isNotEmpty) tags.add(tag);
+      }
+
+      if (name.isNotEmpty) {
+        results.add(OllamaSearchResult(
+          name: name,
+          description: description,
+          pullCount: pullCount,
+          tags: tags,
+        ));
+      }
+    }
+
+    return results;
+  }
+
+  void cancelPull() {
+    _pullClient?.close();
+    _pullClient = null;
   }
 
   void cancelStream() {

@@ -10,10 +10,19 @@ class ModelProvider extends ChangeNotifier {
   final Map<String, ModelCapabilities> _capabilities = {};
   final Set<String> _capabilitiesLoading = {};
 
+  bool _isPulling = false;
+  String _pullStatus = '';
+  double? _pullProgress;
+  String? _pullError;
+
   List<String> get models => _models;
   String? get selectedModel => _selectedModel;
   bool get isLoading => _isLoading;
   String? get error => _error;
+  bool get isPulling => _isPulling;
+  String get pullStatus => _pullStatus;
+  double? get pullProgress => _pullProgress;
+  String? get pullError => _pullError;
 
   ModelCapabilities? getCapabilities(String model) => _capabilities[model];
 
@@ -82,6 +91,41 @@ class ModelProvider extends ChangeNotifier {
       thinkingMode: thinkingMode,
       supportsTools: supportsTools,
     );
+  }
+
+  Future<void> pullModel(OllamaService service, String modelName) async {
+    _isPulling = true;
+    _pullStatus = 'Starting pull...';
+    _pullProgress = null;
+    _pullError = null;
+    notifyListeners();
+
+    try {
+      await for (final event in service.pullModel(modelName)) {
+        _pullStatus = event.status;
+        _pullProgress = event.progress;
+        notifyListeners();
+      }
+      _pullStatus = 'Pull complete';
+      _pullError = null;
+      notifyListeners();
+      await fetchModels(service);
+    } catch (e) {
+      _pullError = e.toString();
+      notifyListeners();
+    } finally {
+      _isPulling = false;
+      notifyListeners();
+    }
+  }
+
+  void cancelPull(OllamaService service) {
+    service.cancelPull();
+    _isPulling = false;
+    _pullStatus = '';
+    _pullProgress = null;
+    _pullError = null;
+    notifyListeners();
   }
 
   void selectModel(String model, {OllamaService? service}) {
