@@ -82,6 +82,32 @@ class StorageService {
     throw const FormatException('Unrecognized export format');
   }
 
+  // Saved connection profiles
+
+  static const _savedConnectionsFile = 'saved_connections.json';
+
+  Future<File> get _savedConnections async {
+    final dir = await getApplicationDocumentsDirectory();
+    return File('${dir.path}/$_savedConnectionsFile');
+  }
+
+  Future<List<Map<String, dynamic>>> loadSavedConnections() async {
+    try {
+      final file = await _savedConnections;
+      if (!await file.exists()) return [];
+      final json = await file.readAsString();
+      final List<dynamic> list = jsonDecode(json);
+      return list.cast<Map<String, dynamic>>();
+    } catch (_) {
+      return [];
+    }
+  }
+
+  Future<void> saveSavedConnections(List<Map<String, dynamic>> connections) async {
+    final file = await _savedConnections;
+    await file.writeAsString(jsonEncode(connections));
+  }
+
   // Connection settings persistence
 
   static const _settingsFile = 'connection_settings.json';
