@@ -1,0 +1,440 @@
+@startuml LLM_Disco_Class_Diagram
+title LLM Disco - Class Diagram
+skinparam classAttributeIconSize 0
+skinparam linetype ortho
+
+' ============================================================
+' MODELS
+' ============================================================
+package "Models" {
+  class ChatMessage {
+    + role : String
+    + content : String
+    + timestamp : DateTime
+    + images : List<String>?
+    + thinking : String?
+    + toolCalls : List<Map>?
+    --
+    + toApiMap() : Map<String, dynamic>
+    + toJson() : Map<String, dynamic>
+    + {static} fromJson(Map) : ChatMessage
+  }
+
+  class Conversation {
+    + id : String
+    + title : String
+    + model : String
+    + messages : List<ChatMessage>
+    + createdAt : DateTime
+    + thinkingEnabled : bool
+    + thinkingLevel : String?
+    + webSearchEnabled : bool
+    + numCtx : int?
+    --
+    + toJson() : Map<String, dynamic>
+    + {static} fromJson(Map) : Conversation
+  }
+
+  class ModelCapabilities <<const>> {
+    + supportsVision : bool
+    + supportsThinking : bool
+    + thinkingMode : String?
+    + supportsTools : bool
+    --
+    + toJson() : Map<String, dynamic>
+    + {static} fromJson(Map) : ModelCapabilities
+  }
+
+  class OllamaSearchResult <<const>> {
+    + name : String
+    + description : String?
+    + pullCount : String?
+    + tags : List<String>
+  }
+
+  Conversation "1" *-- "0..*" ChatMessage : messages
+}
+
+' Note: OllamaSearchResult lives in lib/models/ but is grouped
+' with Models above for correct package representation.
+
+' ============================================================
+' SERVICES
+' ============================================================
+package "Services" {
+  class ChatStreamEvent <<const>> {
+    + contentToken : String?
+    + thinkingToken : String?
+    + toolCalls : List<Map>?
+    + done : bool
+    + evalCount : int?
+    + evalDuration : int?
+  }
+
+  class PullProgressEvent {
+    + status : String
+    + digest : String?
+    + total : int?
+    + completed : int?
+    --
+    + progress : double?
+  }
+
+  class OllamaService {
+    + baseUrl : String
+    --
+    + streamChat(model, messages, ...) : Stream<ChatStreamEvent>
+    + fetchModels() : Future<List<String>>
+    + fetchModelInfo(model) : Future<Map>
+    + searchSearXNG(url, query) : Future<List<Map>>
+    + testConnection() : Future<void>
+    + pullModel(name) : Stream<PullProgressEvent>
+    + deleteModel(name) : Future<void>
+    + searchOllamaCom(query) : Future<List<OllamaSearchResult>>
+    + cancelPull() : void
+    + cancelStream() : void
+  }
+
+  class StorageService {
+    --
+    + loadConversations() : Future<List<Conversation>>
+    + saveConversations(List<Conversation>) : Future<void>
+    + deleteAll() : Future<void>
+    + exportConversation(Conversation) : Future<File>
+    + exportAllConversations(List) : Future<File>
+    + importConversations(filePath) : Future<List<Conversation>>
+    + loadSavedConnections() : Future<List<Map>>
+    + saveSavedConnections(List<Map>) : Future<void>
+    + loadConnectionSettings() : Future<Map?>
+    + saveConnectionSettings(...) : Future<void>
+  }
+
+  OllamaService ..> ChatStreamEvent : yields
+  OllamaService ..> PullProgressEvent : yields
+  StorageService ..> Conversation : loads/saves
+}
+
+OllamaService ..> OllamaSearchResult : returns
+
+' ============================================================
+' PROVIDERS (State Management)
+' ============================================================
+package "Providers" {
+  class ConnectionProvider <<ChangeNotifier>> {
+    + service : OllamaService?
+    + isConnected : bool
+    + isConnecting : bool
+    + error : String?
+    + baseUrl : String
+    --
+    + connect({ip, port, useHttp}) : Future<void>
+    + disconnect() : void
+  }
+
+  class ChatProvider <<ChangeNotifier>> {
+    + conversations : List<Conversation>
+    + activeConversation : Conversation?
+    + isStreaming : bool
+    + pendingImageBase64 : String?
+    + searxngUrl : String?
+    + lastTokensPerSec : double?
+    --
+    + setService(OllamaService) : void
+    + setSearxngUrl(String?) : void
+    + setPendingImage(String?) : void
+    + clearPendingImage() : void
+    + createConversation(model) : void
+    + setActiveConversation(Conversation) : void
+    + renameConversation(id, title) : void
+    + importConversations(List) : int
+    + deleteConversation(id) : void
+    + sendMessage(content) : Future<void>
+    + retryLastMessage() : void
+    + stopStreaming() : void
+    + disconnectService() : void
+    + clear() : void
+  }
+
+  class ModelProvider <<ChangeNotifier>> {
+    + models : List<String>
+    + selectedModel : String?
+    + isLoading : bool
+    + isPulling : bool
+    + pullStatus : String
+    + pullProgress : double?
+    + pullError : String?
+    --
+    + getCapabilities(model) : ModelCapabilities?
+    + fetchModels(OllamaService) : Future<void>
+    + fetchCapabilities(service, model) : Future<void>
+    + pullModel(service, modelName) : Future<void>
+    + cancelPull(OllamaService) : void
+    + selectModel(model, {service}) : void
+    + clear() : void
+  }
+
+  ConnectionProvider --> OllamaService : creates & holds
+  ChatProvider --> OllamaService : uses
+  ChatProvider --> StorageService : persists via
+  ChatProvider --> Conversation : manages
+  ModelProvider --> OllamaService : uses
+  ModelProvider --> ModelCapabilities : caches
+}
+
+' ============================================================
+' SCREENS
+' ============================================================
+package "Screens" {
+  class ConnectionScreen <<StatefulWidget>>
+  class ChatListScreen <<StatelessWidget>>
+  class ChatScreen <<StatefulWidget>>
+  class ModelManagementScreen <<StatefulWidget>>
+
+  ConnectionScreen ..> ConnectionProvider : reads
+  ConnectionScreen ..> ChatProvider : configures
+  ConnectionScreen ..> ModelProvider : fetches models
+  ConnectionScreen ..> StorageService : loads/saves settings
+
+  ChatListScreen ..> ChatProvider : reads
+  ChatListScreen ..> ConnectionProvider : reads
+  ChatListScreen ..> ModelProvider : reads
+
+  ChatScreen ..> ChatProvider : reads/writes
+  ChatScreen ..> ModelProvider : reads capabilities
+
+  ModelManagementScreen ..> ModelProvider : reads/writes
+  ModelManagementScreen ..> ConnectionProvider : reads service
+}
+
+' ============================================================
+' WIDGETS
+' ============================================================
+package "Widgets" {
+  class MessageBubble <<StatelessWidget>> {
+    + message : ChatMessage
+    + onRetry : VoidCallback?
+  }
+
+  class ModelSelector <<StatelessWidget>>
+
+  MessageBubble ..> ChatMessage : displays
+  ModelSelector ..> ModelProvider : reads
+}
+
+' ============================================================
+' THEME
+' ============================================================
+package "Theme" {
+  class AppTheme {
+    + {static} dark : ThemeData
+  }
+
+  class MessageColors <<ThemeExtension>> {
+    + userBubble : Color
+    + userText : Color
+    + assistantBubble : Color
+    + assistantText : Color
+    + errorBubble : Color
+    + errorText : Color
+    + errorRetry : Color
+    --
+    + copyWith(...) : MessageColors
+    + lerp(other, t) : MessageColors
+  }
+
+  AppTheme *-- MessageColors : includes extension
+}
+
+@enduml
+
+
+' ============================================================
+' SEPARATE DIAGRAM: Navigation Flow
+' ============================================================
+@startuml LLM_Disco_Navigation
+title LLM Disco - Screen Navigation Flow
+
+[*] --> ConnectionScreen : App Launch
+
+ConnectionScreen --> ChatListScreen : Connect Success
+ChatListScreen --> ConnectionScreen : Disconnect
+ChatListScreen --> ChatScreen : Tap Conversation\nor New Chat
+ChatListScreen --> ModelManagementScreen : Menu > Manage Models
+ChatScreen --> ChatListScreen : Back
+ModelManagementScreen --> ChatListScreen : Back
+
+@enduml
+
+
+' ============================================================
+' SEPARATE DIAGRAM: Sequence - Send Message
+' ============================================================
+@startuml LLM_Disco_SendMessage_Sequence
+title LLM Disco - Send Message Sequence
+
+actor User
+participant ChatScreen
+participant ChatProvider
+participant OllamaService
+participant "Ollama Server" as Ollama
+
+User -> ChatScreen : Type message & tap Send
+ChatScreen -> ChatProvider : sendMessage(content)
+
+ChatProvider -> ChatProvider : Create user ChatMessage\n(with optional image)
+ChatProvider -> ChatProvider : Add to active Conversation
+ChatProvider -> ChatProvider : notifyListeners()
+ChatProvider -> ChatProvider : Create empty assistant ChatMessage
+
+ChatProvider -> OllamaService : streamChat(model, messages,\nthink, thinkingLevel, tools, numCtx)
+OllamaService -> Ollama : POST /api/chat\n(stream: true)
+
+loop streaming response
+  Ollama --> OllamaService : JSON chunk
+  OllamaService --> ChatProvider : ChatStreamEvent
+
+  alt contentToken present
+    ChatProvider -> ChatProvider : Append to assistant message
+  else thinkingToken present
+    ChatProvider -> ChatProvider : Append to thinking text
+  else toolCalls present (web search)
+    ChatProvider -> OllamaService : searchSearXNG(url, query)
+    OllamaService -> "SearXNG" : GET /search
+    "SearXNG" --> OllamaService : results
+    OllamaService --> ChatProvider : search results
+    ChatProvider -> ChatProvider : Add tool response message
+    ChatProvider -> OllamaService : streamChat (continue with tool results)
+  end
+
+  ChatProvider -> ChatProvider : notifyListeners()
+  ChatScreen -> ChatScreen : Rebuild UI
+end
+
+Ollama --> OllamaService : done: true\n(with eval stats)
+OllamaService --> ChatProvider : ChatStreamEvent(done: true)
+ChatProvider -> ChatProvider : Calculate tokens/sec
+ChatProvider -> ChatProvider : Auto-title if first message
+ChatProvider -> ChatProvider : _persist() via StorageService
+
+@enduml
+
+
+' ============================================================
+' SEPARATE DIAGRAM: Sequence - Connect to Ollama
+' ============================================================
+@startuml LLM_Disco_Connection_Sequence
+title LLM Disco - Connection Sequence
+
+actor User
+participant ConnectionScreen
+participant ConnectionProvider
+participant OllamaService
+participant ModelProvider
+participant ChatProvider
+participant StorageService
+
+User -> ConnectionScreen : Enter IP/Port, tap Connect
+ConnectionScreen -> ConnectionProvider : connect(ip, port, useHttp)
+ConnectionProvider -> ConnectionProvider : Build baseUrl
+ConnectionProvider -> OllamaService ** : Create(baseUrl)
+ConnectionProvider -> OllamaService : testConnection()
+OllamaService -> "Ollama Server" : GET /api/tags
+"Ollama Server" --> OllamaService : 200 OK
+
+alt Connection Failed
+  OllamaService --> ConnectionProvider : throws Exception
+  ConnectionProvider -> ConnectionProvider : set error
+  ConnectionProvider --> ConnectionScreen : notifyListeners()
+  ConnectionScreen -> User : Show error
+else Connection Success
+  OllamaService --> ConnectionProvider : success
+  ConnectionProvider -> ConnectionProvider : isConnected = true
+  ConnectionProvider --> ConnectionScreen : notifyListeners()
+
+  ConnectionScreen -> ChatProvider : setService(service)
+  ConnectionScreen -> ChatProvider : setSearxngUrl(url)
+  ConnectionScreen -> ModelProvider : fetchModels(service)
+  ModelProvider -> OllamaService : fetchModels()
+  OllamaService -> "Ollama Server" : GET /api/tags
+  "Ollama Server" --> OllamaService : model list
+  OllamaService --> ModelProvider : List<String>
+  ModelProvider -> ModelProvider : Auto-select first model
+
+  ConnectionScreen -> StorageService : saveConnectionSettings(...)
+  ConnectionScreen -> ConnectionScreen : Navigate to ChatListScreen
+end
+
+@enduml
+
+
+' ============================================================
+' SEPARATE DIAGRAM: Component Diagram
+' ============================================================
+@startuml LLM_Disco_Component
+title LLM Disco - Component Architecture
+
+package "Flutter App" {
+  package "UI Layer" {
+    [ConnectionScreen]
+    [ChatListScreen]
+    [ChatScreen]
+    [ModelManagementScreen]
+    [MessageBubble]
+    [ModelSelector]
+  }
+
+  package "State Layer" {
+    [ConnectionProvider]
+    [ChatProvider]
+    [ModelProvider]
+  }
+
+  package "Data Layer" {
+    [OllamaService]
+    [StorageService]
+  }
+
+  package "Domain" {
+    [ChatMessage]
+    [Conversation]
+    [ModelCapabilities]
+  }
+}
+
+cloud "External Services" {
+  [Ollama REST API]
+  [SearXNG Search]
+}
+
+database "Local Storage" {
+  [conversations.json]
+  [connection_settings.json]
+  [saved_connections.json]
+}
+
+' UI -> State
+[ConnectionScreen] --> [ConnectionProvider]
+[ConnectionScreen] --> [ChatProvider]
+[ConnectionScreen] --> [ModelProvider]
+[ChatListScreen] --> [ChatProvider]
+[ChatListScreen] --> [ModelProvider]
+[ChatScreen] --> [ChatProvider]
+[ChatScreen] --> [ModelProvider]
+[ModelManagementScreen] --> [ModelProvider]
+[MessageBubble] --> [ChatMessage]
+[ModelSelector] --> [ModelProvider]
+
+' State -> Data
+[ConnectionProvider] --> [OllamaService]
+[ChatProvider] --> [OllamaService]
+[ChatProvider] --> [StorageService]
+[ModelProvider] --> [OllamaService]
+
+' Data -> External
+[OllamaService] --> [Ollama REST API] : HTTP
+[OllamaService] --> [SearXNG Search] : HTTP
+[StorageService] --> [conversations.json]
+[StorageService] --> [connection_settings.json]
+[StorageService] --> [saved_connections.json]
+
+@enduml
