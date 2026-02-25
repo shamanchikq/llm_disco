@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 class ChatMessage {
   final String role; // 'user', 'assistant', or 'tool'
   String content;
@@ -18,17 +20,46 @@ class ChatMessage {
   }) : timestamp = timestamp ?? DateTime.now();
 
   Map<String, dynamic> toApiMap() {
+    var apiContent = content;
+    final apiImages = <String>[...?images];
+
+    if (files != null && files!.isNotEmpty) {
+      final textParts = <String>[];
+      for (final file in files!) {
+        final name = file['name'] ?? '';
+        final data = file['data'] ?? '';
+
+        if (_isImageExtension(name)) {
+          apiImages.add(data);
+        } else {
+          try {
+            final decoded = utf8.decode(base64Decode(data));
+            textParts
+                .add('--- File: $name ---\n$decoded\n--- End of file ---');
+          } catch (_) {
+            textParts.add(
+                '[Attached file: $name (binary, cannot be displayed)]');
+          }
+        }
+      }
+      if (textParts.isNotEmpty) {
+        apiContent = '${textParts.join('\n\n')}\n\n$apiContent';
+      }
+    }
+
     final map = <String, dynamic>{
       'role': role,
-      'content': content,
+      'content': apiContent,
     };
-    if (images != null && images!.isNotEmpty) {
-      map['images'] = images;
-    }
-    if (files != null && files!.isNotEmpty) {
-      map['files'] = files;
+    if (apiImages.isNotEmpty) {
+      map['images'] = apiImages;
     }
     return map;
+  }
+
+  static bool _isImageExtension(String name) {
+    final ext = name.split('.').last.toLowerCase();
+    return {'jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'pdf'}.contains(ext);
   }
 
   Map<String, dynamic> toJson() {

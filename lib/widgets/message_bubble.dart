@@ -60,6 +60,40 @@ class MessageBubble extends StatelessWidget {
                     ),
                   ),
                 ),
+              if (message.files != null && message.files!.isNotEmpty)
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 8),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: message.files!.map((file) {
+                      return Padding(
+                        padding: const EdgeInsets.only(bottom: 4),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(
+                              Icons.attach_file_rounded,
+                              size: 14,
+                              color: msgColors.userText.withValues(alpha: 0.7),
+                            ),
+                            const SizedBox(width: 4),
+                            Flexible(
+                              child: Text(
+                                file['name'] ?? 'file',
+                                style: TextStyle(
+                                  color: msgColors.userText.withValues(alpha: 0.7),
+                                  fontSize: 13,
+                                ),
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ),
+                          ],
+                        ),
+                      );
+                    }).toList(),
+                  ),
+                ),
               SelectableText(
                 message.content.isEmpty ? '...' : message.content,
                 style: TextStyle(
