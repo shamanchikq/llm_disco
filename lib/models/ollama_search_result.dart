@@ -11,3 +11,10 @@ class OllamaSearchResult {
     this.tags = const [],
   });
 }
+
+class ModelTag {
+  final String name;
+  final String? size;
+
+  const ModelTag({required this.name, this.size});
+}

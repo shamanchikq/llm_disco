@@ -316,6 +316,48 @@ class OllamaService {
     return results;
   }
 
+  Future<List<ModelTag>> fetchModelTagsFromWeb(String modelName) async {
+    final uri = Uri.https('ollama.com', '/library/$modelName/tags');
+    final response = await http.get(uri).timeout(const Duration(seconds: 15));
+
+    if (response.statusCode != 200) {
+      throw Exception('Failed to fetch tags: HTTP ${response.statusCode}');
+    }
+
+    final html = response.body;
+    final tags = <ModelTag>[];
+    final seen = <String>{};
+
+    // Each tag is in an <a href="/library/modelName:tag"> block
+    // Content: "modelName:tag \n hash • 3.3GB • 128K context window • ..."
+    final blockPattern = RegExp(
+      r'<a[^>]*href="/library/'
+      '${RegExp.escape(modelName)}:([^"]+)"'
+      r'[^>]*>([\s\S]*?)</a>',
+    );
+
+    for (final match in blockPattern.allMatches(html)) {
+      final tagName = match.group(1) ?? '';
+      final block = match.group(2) ?? '';
+
+      if (tagName.isEmpty || seen.contains(tagName)) continue;
+      seen.add(tagName);
+
+      // Extract size like "3.3GB", "815MB", "17GB"
+      String? size;
+      final sizeMatch =
+          RegExp(r'([\d.]+\s*(?:GB|MB|KB|TB))', caseSensitive: false)
+              .firstMatch(block);
+      if (sizeMatch != null) {
+        size = sizeMatch.group(1);
+      }
+
+      tags.add(ModelTag(name: tagName, size: size));
+    }
+
+    return tags;
+  }
+
   void cancelPull() {
     _pullClient?.close();
     _pullClient = null;

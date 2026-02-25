@@ -4,7 +4,7 @@ import '../providers/connection_provider.dart';
 import '../providers/chat_provider.dart';
 import '../providers/model_provider.dart';
 import '../services/storage_service.dart';
-import 'chat_list_screen.dart';
+import 'main_screen.dart';
 
 class ConnectionScreen extends StatefulWidget {
   const ConnectionScreen({super.key});
@@ -295,7 +295,7 @@ class _ConnectionScreenState extends State<ConnectionScreen> {
 
       if (!mounted) return;
       navigator.pushReplacement(
-        MaterialPageRoute(builder: (_) => const ChatListScreen()),
+        MaterialPageRoute(builder: (_) => const MainScreen()),
       );
     } else if (mounted && connectionProvider.error != null) {
       messenger.showSnackBar(

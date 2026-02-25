@@ -14,6 +14,9 @@ class ChatProvider extends ChangeNotifier with WidgetsBindingObserver {
   Conversation? _activeConversation;
   bool _isStreaming = false;
   String? _pendingImageBase64;
+  String? _pendingFileName;
+  String? _pendingFileBase64;
+  String? _pendingFileMimeType;
   String? _searxngUrl;
   Timer? _persistTimer;
   double? _lastTokensPerSec;
@@ -30,6 +33,7 @@ class ChatProvider extends ChangeNotifier with WidgetsBindingObserver {
   Conversation? get activeConversation => _activeConversation;
   bool get isStreaming => _isStreaming;
   String? get pendingImageBase64 => _pendingImageBase64;
+  String? get pendingFileName => _pendingFileName;
   String? get searxngUrl => _searxngUrl;
   double? get lastTokensPerSec => _lastTokensPerSec;
 
@@ -48,6 +52,20 @@ class ChatProvider extends ChangeNotifier with WidgetsBindingObserver {
 
   void clearPendingImage() {
     _pendingImageBase64 = null;
+    notifyListeners();
+  }
+
+  void setPendingFile(String name, String base64, String mimeType) {
+    _pendingFileName = name;
+    _pendingFileBase64 = base64;
+    _pendingFileMimeType = mimeType;
+    notifyListeners();
+  }
+
+  void clearPendingFile() {
+    _pendingFileName = null;
+    _pendingFileBase64 = null;
+    _pendingFileMimeType = null;
     notifyListeners();
   }
 
@@ -95,6 +113,14 @@ class ChatProvider extends ChangeNotifier with WidgetsBindingObserver {
     return added;
   }
 
+  void toggleFilesEnabled(String id) {
+    final conv = _conversations.where((c) => c.id == id).firstOrNull;
+    if (conv == null) return;
+    conv.filesEnabled = !conv.filesEnabled;
+    notifyListeners();
+    _persist();
+  }
+
   void deleteConversation(String id) {
     _conversations.removeWhere((c) => c.id == id);
     if (_activeConversation?.id == id) {
@@ -111,8 +137,14 @@ class ChatProvider extends ChangeNotifier with WidgetsBindingObserver {
       role: 'user',
       content: content,
       images: _pendingImageBase64 != null ? [_pendingImageBase64!] : null,
+      files: _pendingFileBase64 != null
+          ? [{'name': _pendingFileName!, 'data': _pendingFileBase64!, 'type': _pendingFileMimeType!}]
+          : null,
     );
     _pendingImageBase64 = null;
+    _pendingFileName = null;
+    _pendingFileBase64 = null;
+    _pendingFileMimeType = null;
     _activeConversation!.messages.add(userMessage);
 
     // Auto-title from first user message
@@ -291,14 +323,21 @@ class ChatProvider extends ChangeNotifier with WidgetsBindingObserver {
     final lastUserMsg = messages[lastUserIndex];
     final content = lastUserMsg.content;
     final images = lastUserMsg.images;
+    final files = lastUserMsg.files;
 
     // Remove from lastUserIndex onward
     messages.removeRange(lastUserIndex, messages.length);
     notifyListeners();
 
-    // Re-send with same images
+    // Re-send with same images and files
     if (images != null && images.isNotEmpty) {
       _pendingImageBase64 = images.first;
+    }
+    if (files != null && files.isNotEmpty) {
+      final f = files.first;
+      _pendingFileName = f['name'];
+      _pendingFileBase64 = f['data'];
+      _pendingFileMimeType = f['type'];
     }
     await sendMessage(content);
   }

@@ -10,6 +10,7 @@ class Conversation {
   String? thinkingLevel;
   bool webSearchEnabled;
   int? numCtx;
+  bool filesEnabled;
 
   Conversation({
     required this.id,
@@ -21,6 +22,7 @@ class Conversation {
     this.thinkingLevel,
     this.webSearchEnabled = false,
     this.numCtx,
+    this.filesEnabled = false,
   })  : title = title ?? 'New Chat',
         messages = messages ?? [],
         createdAt = createdAt ?? DateTime.now();
@@ -36,6 +38,7 @@ class Conversation {
       'thinkingLevel': thinkingLevel,
       'webSearchEnabled': webSearchEnabled,
       if (numCtx != null) 'numCtx': numCtx,
+      'filesEnabled': filesEnabled,
     };
   }
 
@@ -52,6 +55,7 @@ class Conversation {
       thinkingLevel: json['thinkingLevel'] as String?,
       webSearchEnabled: json['webSearchEnabled'] as bool? ?? false,
       numCtx: json['numCtx'] as int?,
+      filesEnabled: json['filesEnabled'] as bool? ?? false,
     );
   }
 }

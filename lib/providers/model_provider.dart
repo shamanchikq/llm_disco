@@ -14,6 +14,7 @@ class ModelProvider extends ChangeNotifier {
   String _pullStatus = '';
   double? _pullProgress;
   String? _pullError;
+  String? _pullingModelName;
 
   List<String> get models => _models;
   String? get selectedModel => _selectedModel;
@@ -23,6 +24,7 @@ class ModelProvider extends ChangeNotifier {
   String get pullStatus => _pullStatus;
   double? get pullProgress => _pullProgress;
   String? get pullError => _pullError;
+  String? get pullingModelName => _pullingModelName;
 
   ModelCapabilities? getCapabilities(String model) => _capabilities[model];
 
@@ -71,6 +73,7 @@ class ModelProvider extends ChangeNotifier {
     final supportsVision = capStrings.contains('vision');
     final supportsTools = capStrings.contains('tools');
     final supportsThinking = capStrings.contains('thinking');
+    final supportsFiles = capStrings.contains('files');
 
     String? thinkingMode;
     if (supportsThinking) {
@@ -90,10 +93,12 @@ class ModelProvider extends ChangeNotifier {
       supportsThinking: supportsThinking,
       thinkingMode: thinkingMode,
       supportsTools: supportsTools,
+      supportsFiles: supportsFiles,
     );
   }
 
   Future<void> pullModel(OllamaService service, String modelName) async {
+    _pullingModelName = modelName;
     _isPulling = true;
     _pullStatus = 'Starting pull...';
     _pullProgress = null;
@@ -125,6 +130,7 @@ class ModelProvider extends ChangeNotifier {
     _pullStatus = '';
     _pullProgress = null;
     _pullError = null;
+    _pullingModelName = null;
     notifyListeners();
   }
 

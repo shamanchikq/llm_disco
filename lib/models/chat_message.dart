@@ -5,6 +5,7 @@ class ChatMessage {
   List<String>? images; // base64-encoded
   String? thinking;
   List<Map<String, dynamic>>? toolCalls;
+  List<Map<String, String>>? files; // each: {name, data (base64), type (mime)}
 
   ChatMessage({
     required this.role,
@@ -13,6 +14,7 @@ class ChatMessage {
     this.images,
     this.thinking,
     this.toolCalls,
+    this.files,
   }) : timestamp = timestamp ?? DateTime.now();
 
   Map<String, dynamic> toApiMap() {
@@ -22,6 +24,9 @@ class ChatMessage {
     };
     if (images != null && images!.isNotEmpty) {
       map['images'] = images;
+    }
+    if (files != null && files!.isNotEmpty) {
+      map['files'] = files;
     }
     return map;
   }
@@ -35,6 +40,7 @@ class ChatMessage {
     if (images != null) map['images'] = images;
     if (thinking != null) map['thinking'] = thinking;
     if (toolCalls != null) map['toolCalls'] = toolCalls;
+    if (files != null) map['files'] = files;
     return map;
   }
 
@@ -47,6 +53,9 @@ class ChatMessage {
       thinking: json['thinking'] as String?,
       toolCalls: (json['toolCalls'] as List<dynamic>?)
           ?.map((e) => Map<String, dynamic>.from(e as Map))
+          .toList(),
+      files: (json['files'] as List<dynamic>?)
+          ?.map((e) => Map<String, String>.from(e as Map))
           .toList(),
     );
   }
