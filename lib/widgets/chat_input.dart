@@ -124,25 +124,7 @@ class _ChatInputState extends State<ChatInput> {
                   child: Row(
                     children: [
                       if (hasThinking) ...[
-                        if (caps?.thinkingMode == 'levels')
-                          _buildThinkingDropdown(conversation, colors, theme)
-                        else
-                          FilterChip(
-                            label: const Text('Think'),
-                            selected: conversation.thinkingEnabled,
-                            onSelected: (val) {
-                              setState(() {
-                                conversation.thinkingEnabled = val;
-                              });
-                            },
-                            avatar: Icon(
-                              Icons.psychology_outlined,
-                              size: 18,
-                              color: conversation.thinkingEnabled
-                                  ? colors.onSecondaryContainer
-                                  : colors.onSurface,
-                            ),
-                          ),
+                        _buildThinkingDropdown(conversation, colors, theme),
                         const SizedBox(width: 8),
                       ],
                       if (showSearchChip)

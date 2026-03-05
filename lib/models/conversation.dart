@@ -11,6 +11,11 @@ class Conversation {
   bool webSearchEnabled;
   int? numCtx;
   bool filesEnabled;
+  double? temperature;
+  int? topK;
+  double? topP;
+  double? repeatPenalty;
+  int? seed;
 
   Conversation({
     required this.id,
@@ -23,6 +28,11 @@ class Conversation {
     this.webSearchEnabled = false,
     this.numCtx,
     this.filesEnabled = false,
+    this.temperature,
+    this.topK,
+    this.topP,
+    this.repeatPenalty,
+    this.seed,
   })  : title = title ?? 'New Chat',
         messages = messages ?? [],
         createdAt = createdAt ?? DateTime.now();
@@ -39,6 +49,11 @@ class Conversation {
       'webSearchEnabled': webSearchEnabled,
       if (numCtx != null) 'numCtx': numCtx,
       'filesEnabled': filesEnabled,
+      if (temperature != null) 'temperature': temperature,
+      if (topK != null) 'topK': topK,
+      if (topP != null) 'topP': topP,
+      if (repeatPenalty != null) 'repeatPenalty': repeatPenalty,
+      if (seed != null) 'seed': seed,
     };
   }
 
@@ -56,6 +71,11 @@ class Conversation {
       webSearchEnabled: json['webSearchEnabled'] as bool? ?? false,
       numCtx: json['numCtx'] as int?,
       filesEnabled: json['filesEnabled'] as bool? ?? false,
+      temperature: json['temperature'] as double?,
+      topK: json['topK'] as int?,
+      topP: json['topP'] as double?,
+      repeatPenalty: json['repeatPenalty'] as double?,
+      seed: json['seed'] as int?,
     );
   }
 }

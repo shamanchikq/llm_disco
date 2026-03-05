@@ -160,8 +160,7 @@ class _MainScreenState extends State<MainScreen> {
                   ),
           ),
           if (chatProvider.isStreaming) const LinearProgressIndicator(),
-          if (!chatProvider.isStreaming &&
-              chatProvider.lastTokensPerSec != null)
+          if (chatProvider.lastTokensPerSec != null)
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
               child: Align(

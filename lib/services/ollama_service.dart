@@ -54,6 +54,11 @@ class OllamaService {
     String? thinkingLevel,
     List<Map<String, dynamic>>? tools,
     int? numCtx,
+    double? temperature,
+    int? topK,
+    double? topP,
+    double? repeatPenalty,
+    int? seed,
   }) async* {
     _activeClient = http.Client();
     try {
@@ -70,15 +75,27 @@ class OllamaService {
       };
 
       if (think == true) {
-        body['think'] = true;
+        if (thinkingLevel != null) {
+          body['think'] = thinkingLevel;
+        } else {
+          body['think'] = true;
+        }
       }
 
       if (tools != null && tools.isNotEmpty) {
         body['tools'] = tools;
       }
 
-      if (numCtx != null) {
-        body['options'] = {'num_ctx': numCtx};
+      // Build options map with any provided parameters
+      final options = <String, dynamic>{};
+      if (numCtx != null) options['num_ctx'] = numCtx;
+      if (temperature != null) options['temperature'] = temperature;
+      if (topK != null) options['top_k'] = topK;
+      if (topP != null) options['top_p'] = topP;
+      if (repeatPenalty != null) options['repeat_penalty'] = repeatPenalty;
+      if (seed != null) options['seed'] = seed;
+      if (options.isNotEmpty) {
+        body['options'] = options;
       }
 
       request.body = jsonEncode(body);

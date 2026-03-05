@@ -53,10 +53,9 @@ class MessageBubble extends StatelessWidget {
                   padding: const EdgeInsets.only(bottom: 8),
                   child: ClipRRect(
                     borderRadius: BorderRadius.circular(12),
-                    child: Image.memory(
-                      base64Decode(message.images!.first),
+                    child: _CachedBase64Image(
+                      base64Data: message.images!.first,
                       width: 200,
-                      fit: BoxFit.cover,
                     ),
                   ),
                 ),
@@ -286,6 +285,36 @@ class MessageBubble extends StatelessWidget {
           top: BorderSide(color: theme.colorScheme.outlineVariant, width: 1),
         ),
       ),
+    );
+  }
+}
+
+class _CachedBase64Image extends StatefulWidget {
+  final String base64Data;
+  final double width;
+
+  const _CachedBase64Image({required this.base64Data, required this.width});
+
+  @override
+  State<_CachedBase64Image> createState() => _CachedBase64ImageState();
+}
+
+class _CachedBase64ImageState extends State<_CachedBase64Image> {
+  late final Uint8List _bytes;
+
+  @override
+  void initState() {
+    super.initState();
+    _bytes = base64Decode(widget.base64Data);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Image.memory(
+      _bytes,
+      width: widget.width,
+      fit: BoxFit.cover,
+      gaplessPlayback: true,
     );
   }
 }

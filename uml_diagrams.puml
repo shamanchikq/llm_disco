@@ -10,9 +10,11 @@ package "Models" {
     + timestamp : DateTime
     + images : List<String>?
     + thinking : String?
+    + toolCalls : List?
+    + files : List?
     --
-    + toJson() : Map
     + toApiMap() : Map
+    + toJson() : Map
   }
 
   class Conversation {
@@ -22,8 +24,18 @@ package "Models" {
     + messages : List<ChatMessage>
     + thinkingEnabled : bool
     + webSearchEnabled : bool
+    + numCtx : int?
+    + filesEnabled : bool
     --
     + toJson() : Map
+  }
+
+  class ModelCapabilities {
+    + supportsVision : bool
+    + supportsThinking : bool
+    + thinkingMode : String?
+    + supportsTools : bool
+    + supportsFiles : bool
   }
 
   Conversation "1" *-- "0..*" ChatMessage
@@ -35,16 +47,22 @@ package "Services" {
     --
     + streamChat(model, messages) : Stream
     + fetchModels() : Future<List<String>>
-    + testConnection() : Future<void>
+    + fetchModelInfo(model) : Future<Map>
+    + pullModel(name) : Stream
+    + deleteModel(name) : Future<void>
+    + searchSearXNG(url, query) : Future<List>
+    + testConnection() : Future<bool>
     + cancelStream() : void
   }
 
   class StorageService {
     --
-    + loadConversations() : Future<List<Conversation>>
+    + loadConversations() : Future<List>
     + saveConversations(list) : Future<void>
     + loadConnectionSettings() : Future<Map?>
     + saveConnectionSettings(...) : Future<void>
+    + exportConversation(conv) : Future<File>
+    + importConversations(path) : Future<List>
   }
 }
 
@@ -54,7 +72,7 @@ package "Providers" {
     + isConnected : bool
     + error : String?
     --
-    + connect(ip, port) : Future<void>
+    + connect(ip, port, useHttp) : Future<bool>
     + disconnect() : void
   }
 
@@ -63,10 +81,11 @@ package "Providers" {
     + activeConversation : Conversation?
     + isStreaming : bool
     --
-    + createConversation(model) : void
+    + createConversation(model) : Conversation
     + sendMessage(content) : Future<void>
     + stopStreaming() : void
     + deleteConversation(id) : void
+    + retryLastMessage() : Future<void>
   }
 
   class ModelProvider {
@@ -74,7 +93,9 @@ package "Providers" {
     + selectedModel : String?
     --
     + fetchModels(service) : Future<void>
+    + fetchCapabilities(service, model) : Future<void>
     + selectModel(model) : void
+    + pullModel(service, name) : Future<void>
   }
 
   ConnectionProvider "1" --> "0..1" OllamaService : creates
@@ -82,19 +103,19 @@ package "Providers" {
   ChatProvider "1" --> "0..1" StorageService : saves via
   ChatProvider "1" --> "0..*" Conversation : manages
   ModelProvider "1" --> "0..1" OllamaService : uses
+  ModelProvider "1" --> "0..*" ModelCapabilities : caches
 }
 
 package "Screens" {
   class ConnectionScreen
-  class ChatListScreen
-  class ChatScreen
+  class MainScreen
+  class ModelManagementScreen
 
   ConnectionScreen ..> ConnectionProvider : reads/writes
   ConnectionScreen ..> ModelProvider : fetches models
-  ChatListScreen ..> ChatProvider : reads
-  ChatListScreen ..> ModelProvider : reads
-  ChatScreen ..> ChatProvider : reads/writes
-  ChatScreen ..> ModelProvider : reads capabilities
+  MainScreen ..> ChatProvider : reads/writes
+  MainScreen ..> ModelProvider : reads capabilities
+  ModelManagementScreen ..> ModelProvider : manages models
 }
 
 @enduml
@@ -105,37 +126,53 @@ title LLM Disco - Screen Navigation
 
 [*] --> ConnectionScreen : App Launch
 
-ConnectionScreen --> ChatListScreen : Connect Success
-ChatListScreen --> ConnectionScreen : Disconnect
-ChatListScreen --> ChatScreen : Tap / New Chat
-ChatScreen --> ChatListScreen : Back
+ConnectionScreen --> MainScreen : Connect Success
+MainScreen --> ConnectionScreen : Disconnect
+MainScreen --> ModelManagementScreen : Manage Models
+ModelManagementScreen --> MainScreen : Back
 
 @enduml
 
 
 @startuml LLM_Disco_SendMessage_Sequence
-title LLM Disco - Send Message
+title LLM Disco - Send Message (with Tool-Calling)
 
 actor User
-participant ChatScreen
+participant MainScreen
 participant ChatProvider
 participant OllamaService
 participant "Ollama Server" as Ollama
+participant SearXNG
 
-User -> ChatScreen : type & tap Send
-ChatScreen -> ChatProvider : sendMessage(content)
-ChatProvider -> ChatProvider : add user message\nto conversation
-ChatProvider -> OllamaService : streamChat(model, messages)
-OllamaService -> Ollama : POST /api/chat
+User -> MainScreen : type & tap Send
+MainScreen -> ChatProvider : sendMessage(content)
+ChatProvider -> ChatProvider : create user message\nadd to conversation
 
-loop streaming
-  Ollama --> OllamaService : JSON chunk
-  OllamaService --> ChatProvider : token
-  ChatProvider -> ChatProvider : append to\nassistant message
-  ChatProvider --> ChatScreen : notifyListeners()
+loop tool-calling loop (max 5 iterations)
+  ChatProvider -> OllamaService : streamChat(model, messages, tools?)
+  OllamaService -> Ollama : POST /api/chat
+
+  loop streaming tokens
+    Ollama --> OllamaService : JSON chunk
+    OllamaService --> ChatProvider : ChatStreamEvent
+    ChatProvider -> ChatProvider : append to\nassistant message
+    ChatProvider --> MainScreen : notifyListeners()
+  end
+
+  Ollama --> OllamaService : done: true
+
+  alt tool_calls received
+    ChatProvider -> OllamaService : searchSearXNG(query)
+    OllamaService -> SearXNG : GET /search?q=...
+    SearXNG --> OllamaService : JSON results
+    OllamaService --> ChatProvider : search results
+    ChatProvider -> ChatProvider : add tool message\nwith results
+    note right: loop continues\nwith tool results
+  else no tool_calls
+    note right: break loop
+  end
 end
 
-Ollama --> OllamaService : done: true
-ChatProvider -> ChatProvider : save to storage
+ChatProvider -> ChatProvider : persist to storage
 
 @enduml

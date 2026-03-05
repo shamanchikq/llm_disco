@@ -20,6 +20,9 @@ class ChatProvider extends ChangeNotifier with WidgetsBindingObserver {
   String? _searxngUrl;
   Timer? _persistTimer;
   double? _lastTokensPerSec;
+  int _streamTokenCount = 0;
+  DateTime? _streamStartTime;
+  double? _liveTokensPerSec;
 
   ChatProvider({
     StorageService? storageService,
@@ -27,6 +30,7 @@ class ChatProvider extends ChangeNotifier with WidgetsBindingObserver {
   })  : _storageService = storageService,
         _conversations = initialConversations ?? [] {
     WidgetsBinding.instance.addObserver(this);
+    _cleanUpInterruptedMessages();
   }
 
   List<Conversation> get conversations => List.unmodifiable(_conversations);
@@ -35,7 +39,7 @@ class ChatProvider extends ChangeNotifier with WidgetsBindingObserver {
   String? get pendingImageBase64 => _pendingImageBase64;
   String? get pendingFileName => _pendingFileName;
   String? get searxngUrl => _searxngUrl;
-  double? get lastTokensPerSec => _lastTokensPerSec;
+  double? get lastTokensPerSec => _isStreaming ? _liveTokensPerSec : _lastTokensPerSec;
 
   void setService(OllamaService service) {
     _service = service;
@@ -158,6 +162,9 @@ class ChatProvider extends ChangeNotifier with WidgetsBindingObserver {
     }
 
     _lastTokensPerSec = null;
+    _liveTokensPerSec = null;
+    _streamTokenCount = 0;
+    _streamStartTime = null;
     _isStreaming = true;
     notifyListeners();
 
@@ -168,10 +175,16 @@ class ChatProvider extends ChangeNotifier with WidgetsBindingObserver {
       if (messages.isNotEmpty && messages.last.role == 'assistant') {
         if (messages.last.content.isEmpty) {
           messages.last.content = '[Error: $e]';
+        } else {
+          // Partial content exists — mark as interrupted, not error
+          messages.last.content += '\n\n*[Response interrupted]*';
         }
       }
     } finally {
       _cancelPersistTimer();
+      _liveTokensPerSec = null;
+      _streamTokenCount = 0;
+      _streamStartTime = null;
       _isStreaming = false;
       notifyListeners();
       _persist();
@@ -194,6 +207,9 @@ class ChatProvider extends ChangeNotifier with WidgetsBindingObserver {
 
     // Tool-calling loop: may iterate if model requests tool calls
     for (var iteration = 0; iteration < 5; iteration++) {
+      _streamTokenCount = 0;
+      _streamStartTime = null;
+      _liveTokensPerSec = null;
       final assistantMessage = ChatMessage(role: 'assistant', content: '');
       conv.messages.add(assistantMessage);
       notifyListeners();
@@ -214,16 +230,19 @@ class ChatProvider extends ChangeNotifier with WidgetsBindingObserver {
         conv.model,
         messagesToSend,
         think: thinkingEnabled ? true : null,
+        thinkingLevel: thinkingEnabled ? conv.thinkingLevel : null,
         tools: tools,
         numCtx: conv.numCtx,
       )) {
         if (event.contentToken != null) {
           assistantMessage.content += event.contentToken!;
+          _incrementLiveTokenCount();
           notifyListeners();
         }
         if (event.thinkingToken != null) {
           assistantMessage.thinking =
               (assistantMessage.thinking ?? '') + event.thinkingToken!;
+          _incrementLiveTokenCount();
           notifyListeners();
         }
         if (event.toolCalls != null) {
@@ -364,7 +383,9 @@ class ChatProvider extends ChangeNotifier with WidgetsBindingObserver {
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.paused ||
-        state == AppLifecycleState.inactive) {
+        state == AppLifecycleState.inactive ||
+        state == AppLifecycleState.detached ||
+        state == AppLifecycleState.hidden) {
       _persist();
     }
   }
@@ -378,7 +399,7 @@ class ChatProvider extends ChangeNotifier with WidgetsBindingObserver {
 
   void _startPersistTimer() {
     if (_persistTimer != null) return;
-    _persistTimer = Timer.periodic(const Duration(seconds: 2), (_) {
+    _persistTimer = Timer.periodic(const Duration(seconds: 1), (_) {
       _persist();
     });
   }
@@ -390,5 +411,26 @@ class ChatProvider extends ChangeNotifier with WidgetsBindingObserver {
 
   Future<void> _persist() async {
     await _storageService?.saveConversations(_conversations);
+  }
+
+  void _incrementLiveTokenCount() {
+    _streamTokenCount++;
+    _streamStartTime ??= DateTime.now();
+    final elapsed = DateTime.now().difference(_streamStartTime!).inMilliseconds;
+    if (elapsed >= 1000) {
+      _liveTokensPerSec = _streamTokenCount / (elapsed / 1000.0);
+    }
+  }
+
+  void _cleanUpInterruptedMessages() {
+    for (final conv in _conversations) {
+      if (conv.messages.isNotEmpty &&
+          conv.messages.last.role == 'assistant' &&
+          conv.messages.last.content.isEmpty &&
+          conv.messages.last.thinking == null) {
+        // Empty assistant message from a killed stream — remove it
+        conv.messages.removeLast();
+      }
+    }
   }
 }
