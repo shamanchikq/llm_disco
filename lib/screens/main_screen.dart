@@ -270,8 +270,12 @@ class _ChatBody extends StatelessWidget {
                         !chatProvider.isStreaming &&
                         message.content.isNotEmpty &&
                         !message.content.startsWith('[Error:');
+                    final isCurrentlyStreaming = isLastMessage &&
+                        chatProvider.isStreaming &&
+                        message.role == 'assistant';
                     final bubble = MessageBubble(
                       message: message,
+                      isStreaming: isCurrentlyStreaming,
                       onRetry: isLastMessage &&
                               message.content.startsWith('[Error:')
                           ? () => chatProvider.retryLastMessage()

@@ -10,9 +10,10 @@ import 'code_block_builder.dart';
 
 class MessageBubble extends StatelessWidget {
   final ChatMessage message;
+  final bool isStreaming;
   final VoidCallback? onRetry;
 
-  const MessageBubble({super.key, required this.message, this.onRetry});
+  const MessageBubble({super.key, required this.message, this.isStreaming = false, this.onRetry});
 
   @override
   Widget build(BuildContext context) {
@@ -183,6 +184,17 @@ class MessageBubble extends StatelessWidget {
                 message.content,
                 style: TextStyle(
                   color: msgColors.errorText,
+                  fontSize: 15,
+                  height: 1.5,
+                ),
+              )
+            else if (isStreaming)
+              // Use plain Text during streaming to avoid focus node
+              // deactivation issues when MarkdownBody rebuilds rapidly.
+              Text(
+                message.content,
+                style: TextStyle(
+                  color: msgColors.assistantText,
                   fontSize: 15,
                   height: 1.5,
                 ),
