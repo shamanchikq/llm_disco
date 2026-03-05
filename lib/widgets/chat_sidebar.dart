@@ -9,12 +9,55 @@ import '../screens/model_management_screen.dart';
 import '../services/storage_service.dart';
 import 'model_selector.dart';
 
-class ChatSidebar extends StatelessWidget {
+class ChatSidebar extends StatefulWidget {
   const ChatSidebar({super.key});
 
   @override
+  State<ChatSidebar> createState() => _ChatSidebarState();
+}
+
+class _ChatSidebarState extends State<ChatSidebar> {
+  ChatProvider? _chatProvider;
+  int _lastHash = 0;
+
+  int _computeHash(ChatProvider cp) => Object.hash(
+    cp.activeConversation?.id,
+    Object.hashAll(cp.conversations.map((c) => Object.hash(
+      c.id, c.title, c.messages.length,
+    ))),
+  );
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    // Use context.read to avoid registering as an InheritedNotifier dependent.
+    final newProvider = context.read<ChatProvider>();
+    if (_chatProvider != newProvider) {
+      _chatProvider?.removeListener(_onChanged);
+      _chatProvider = newProvider;
+      _lastHash = _computeHash(newProvider);
+      _chatProvider!.addListener(_onChanged);
+    }
+  }
+
+  void _onChanged() {
+    if (!mounted) return;
+    final hash = _computeHash(_chatProvider!);
+    if (hash != _lastHash) {
+      _lastHash = hash;
+      setState(() {});
+    }
+  }
+
+  @override
+  void dispose() {
+    _chatProvider?.removeListener(_onChanged);
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
-    final chatProvider = context.watch<ChatProvider>();
+    final chatProvider = _chatProvider!;
     final theme = Theme.of(context);
     final colors = theme.colorScheme;
 

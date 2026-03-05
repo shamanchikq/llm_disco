@@ -19,34 +19,50 @@ class _MainScreenState extends State<MainScreen> {
   String? _lastCapabilityConvId;
 
   void _maybeEnsureCapabilities(
-    ChatProvider chatProvider,
+    String? conversationId,
+    String? conversationModel,
     ModelProvider modelProvider,
     ConnectionProvider connectionProvider,
   ) {
-    final conv = chatProvider.activeConversation;
-    if (conv == null) return;
-    if (_lastCapabilityConvId == conv.id) return;
+    if (conversationId == null || conversationModel == null) return;
+    if (_lastCapabilityConvId == conversationId) return;
     if (connectionProvider.service == null) return;
-    _lastCapabilityConvId = conv.id;
-    if (modelProvider.getCapabilities(conv.model) == null) {
-      modelProvider.fetchCapabilities(connectionProvider.service!, conv.model);
+    _lastCapabilityConvId = conversationId;
+    if (modelProvider.getCapabilities(conversationModel) == null) {
+      modelProvider.fetchCapabilities(
+          connectionProvider.service!, conversationModel);
     }
   }
 
   @override
   Widget build(BuildContext context) {
-    final chatProvider = context.watch<ChatProvider>();
     final modelProvider = context.watch<ModelProvider>();
     final connectionProvider = context.watch<ConnectionProvider>();
     final theme = Theme.of(context);
     final colors = theme.colorScheme;
 
-    _maybeEnsureCapabilities(chatProvider, modelProvider, connectionProvider);
+    // Select only stable conversation properties for the Scaffold/AppBar.
+    // These don't change during streaming, so the Scaffold (and its drawer
+    // overlay + focus tree) stays stable — prevents FocusInheritedScope
+    // corruption when the drawer is open during generation.
+    final conversationId = context.select<ChatProvider, String?>(
+      (p) => p.activeConversation?.id,
+    );
+    final conversationTitle = context.select<ChatProvider, String?>(
+      (p) => p.activeConversation?.title,
+    );
+    final conversationModel = context.select<ChatProvider, String?>(
+      (p) => p.activeConversation?.model,
+    );
 
-    final conversation = chatProvider.activeConversation;
-    final messages = conversation == null
-        ? []
-        : conversation.messages.where((m) => m.role != 'tool').toList();
+    _maybeEnsureCapabilities(
+      conversationId,
+      conversationModel,
+      modelProvider,
+      connectionProvider,
+    );
+
+    final hasConversation = conversationId != null;
 
     return Scaffold(
       key: _scaffoldKey,
@@ -56,28 +72,36 @@ class _MainScreenState extends State<MainScreen> {
           icon: const Icon(Icons.menu),
           onPressed: () => _scaffoldKey.currentState?.openDrawer(),
         ),
-        title: conversation != null
+        title: hasConversation
             ? GestureDetector(
-                onTap: () =>
-                    _showRenameDialog(context, chatProvider, conversation),
-                child: Text(conversation.title),
+                onTap: () {
+                  final conv =
+                      context.read<ChatProvider>().activeConversation;
+                  if (conv != null) _showRenameDialog(context, conv);
+                },
+                child: Text(conversationTitle!),
               )
             : const Text('LLM Disco'),
         actions: [
-          if (conversation != null) ...[
+          if (hasConversation) ...[
             IconButton(
               icon: const Icon(Icons.tune_rounded, size: 20),
               tooltip: 'Context size',
-              onPressed: () => _showContextSizeDialog(context, conversation),
+              onPressed: () {
+                final conv =
+                    context.read<ChatProvider>().activeConversation;
+                if (conv != null) _showContextSizeDialog(context, conv);
+              },
             ),
             Container(
-              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+              padding:
+                  const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
               decoration: BoxDecoration(
                 color: colors.surfaceContainerHigh,
                 borderRadius: BorderRadius.circular(8),
               ),
               child: Text(
-                conversation.model,
+                conversationModel!,
                 style: theme.textTheme.bodySmall?.copyWith(
                   color: colors.primary,
                   fontWeight: FontWeight.w500,
@@ -88,103 +112,12 @@ class _MainScreenState extends State<MainScreen> {
           const SizedBox(width: 12),
         ],
       ),
-      body: Column(
-        children: [
-          Expanded(
-            child: messages.isEmpty
-                ? Center(
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Icon(
-                          Icons.auto_awesome_outlined,
-                          size: 40,
-                          color: colors.primary.withValues(alpha: 0.4),
-                        ),
-                        const SizedBox(height: 12),
-                        Text(
-                          'Start a conversation',
-                          style: theme.textTheme.bodyLarge?.copyWith(
-                            color: colors.onSurface.withValues(alpha: 0.6),
-                          ),
-                        ),
-                      ],
-                    ),
-                  )
-                : ListView.builder(
-                    reverse: true,
-                    padding: const EdgeInsets.all(12),
-                    itemCount: messages.length,
-                    itemBuilder: (context, index) {
-                      final message = messages[messages.length - 1 - index];
-                      final isLastMessage = index == 0;
-                      final canSwipeRetry = isLastMessage &&
-                          message.role == 'assistant' &&
-                          !chatProvider.isStreaming &&
-                          message.content.isNotEmpty &&
-                          !message.content.startsWith('[Error:');
-                      final bubble = MessageBubble(
-                        message: message,
-                        onRetry: isLastMessage &&
-                                message.content.startsWith('[Error:')
-                            ? () => chatProvider.retryLastMessage()
-                            : null,
-                      );
-                      if (canSwipeRetry) {
-                        return Dismissible(
-                          key: ValueKey('retry-${message.timestamp}'),
-                          direction: DismissDirection.endToStart,
-                          confirmDismiss: (_) async {
-                            chatProvider.retryLastMessage();
-                            return false;
-                          },
-                          background: Container(
-                            alignment: Alignment.centerRight,
-                            padding: const EdgeInsets.only(right: 20),
-                            child: Row(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                Icon(Icons.refresh_rounded,
-                                    color: colors.primary),
-                                const SizedBox(width: 4),
-                                Text('Retry',
-                                    style: TextStyle(color: colors.primary)),
-                              ],
-                            ),
-                          ),
-                          child: bubble,
-                        );
-                      }
-                      return bubble;
-                    },
-                  ),
-          ),
-          if (chatProvider.isStreaming) const LinearProgressIndicator(),
-          if (chatProvider.lastTokensPerSec != null)
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-              child: Align(
-                alignment: Alignment.centerLeft,
-                child: Text(
-                  '${chatProvider.lastTokensPerSec!.toStringAsFixed(1)} tok/s',
-                  style: theme.textTheme.bodySmall?.copyWith(
-                    color: colors.onSurface.withValues(alpha: 0.5),
-                    fontSize: 12,
-                  ),
-                ),
-              ),
-            ),
-          const ChatInput(),
-        ],
-      ),
+      body: const _ChatBody(),
     );
   }
 
-  void _showRenameDialog(
-    BuildContext context,
-    ChatProvider chatProvider,
-    dynamic conversation,
-  ) {
+  void _showRenameDialog(BuildContext context, dynamic conversation) {
+    final chatProvider = context.read<ChatProvider>();
     final controller = TextEditingController(text: conversation.title);
     showDialog(
       context: context,
@@ -266,16 +199,14 @@ class _MainScreenState extends State<MainScreen> {
             TextButton(
               onPressed: () {
                 final text = controller.text.trim();
-                setState(() {
-                  if (text.isEmpty) {
-                    conversation.numCtx = null;
-                  } else {
-                    final val = int.tryParse(text);
-                    if (val != null && val > 0) {
-                      conversation.numCtx = val;
-                    }
+                if (text.isEmpty) {
+                  conversation.numCtx = null;
+                } else {
+                  final val = int.tryParse(text);
+                  if (val != null && val > 0) {
+                    conversation.numCtx = val;
                   }
-                });
+                }
                 Navigator.pop(ctx);
               },
               child: const Text('Save'),
@@ -283,6 +214,115 @@ class _MainScreenState extends State<MainScreen> {
           ],
         ),
       ),
+    );
+  }
+}
+
+/// Separated body widget that watches ChatProvider for streaming updates.
+/// Isolates frequent streaming rebuilds from the parent Scaffold, preventing
+/// the drawer's focus tree from being corrupted during generation.
+class _ChatBody extends StatelessWidget {
+  const _ChatBody();
+
+  @override
+  Widget build(BuildContext context) {
+    final chatProvider = context.watch<ChatProvider>();
+    final theme = Theme.of(context);
+    final colors = theme.colorScheme;
+
+    final conversation = chatProvider.activeConversation;
+    final messages = conversation == null
+        ? []
+        : conversation.messages.where((m) => m.role != 'tool').toList();
+
+    return Column(
+      children: [
+        Expanded(
+          child: messages.isEmpty
+              ? Center(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(
+                        Icons.auto_awesome_outlined,
+                        size: 40,
+                        color: colors.primary.withValues(alpha: 0.4),
+                      ),
+                      const SizedBox(height: 12),
+                      Text(
+                        'Start a conversation',
+                        style: theme.textTheme.bodyLarge?.copyWith(
+                          color: colors.onSurface.withValues(alpha: 0.6),
+                        ),
+                      ),
+                    ],
+                  ),
+                )
+              : ListView.builder(
+                  reverse: true,
+                  padding: const EdgeInsets.all(12),
+                  itemCount: messages.length,
+                  itemBuilder: (context, index) {
+                    final message = messages[messages.length - 1 - index];
+                    final isLastMessage = index == 0;
+                    final canSwipeRetry = isLastMessage &&
+                        message.role == 'assistant' &&
+                        !chatProvider.isStreaming &&
+                        message.content.isNotEmpty &&
+                        !message.content.startsWith('[Error:');
+                    final bubble = MessageBubble(
+                      message: message,
+                      onRetry: isLastMessage &&
+                              message.content.startsWith('[Error:')
+                          ? () => chatProvider.retryLastMessage()
+                          : null,
+                    );
+                    if (canSwipeRetry) {
+                      return Dismissible(
+                        key: ValueKey('retry-${message.timestamp}'),
+                        direction: DismissDirection.endToStart,
+                        confirmDismiss: (_) async {
+                          chatProvider.retryLastMessage();
+                          return false;
+                        },
+                        background: Container(
+                          alignment: Alignment.centerRight,
+                          padding: const EdgeInsets.only(right: 20),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Icon(Icons.refresh_rounded,
+                                  color: colors.primary),
+                              const SizedBox(width: 4),
+                              Text('Retry',
+                                  style: TextStyle(color: colors.primary)),
+                            ],
+                          ),
+                        ),
+                        child: bubble,
+                      );
+                    }
+                    return bubble;
+                  },
+                ),
+        ),
+        if (chatProvider.isStreaming) const LinearProgressIndicator(),
+        if (!chatProvider.isStreaming && chatProvider.lastTokensPerSec != null)
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+            child: Align(
+              alignment: Alignment.centerLeft,
+              child: Text(
+                '${chatProvider.lastTokensPerSec!.toStringAsFixed(1)} tok/s',
+                style: theme.textTheme.bodySmall?.copyWith(
+                  color: colors.onSurface.withValues(alpha: 0.5),
+                  fontSize: 12,
+                ),
+              ),
+            ),
+          ),
+        const ChatInput(),
+      ],
     );
   }
 }

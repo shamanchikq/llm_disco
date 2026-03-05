@@ -20,9 +20,6 @@ class ChatProvider extends ChangeNotifier with WidgetsBindingObserver {
   String? _searxngUrl;
   Timer? _persistTimer;
   double? _lastTokensPerSec;
-  int _streamTokenCount = 0;
-  DateTime? _streamStartTime;
-  double? _liveTokensPerSec;
 
   ChatProvider({
     StorageService? storageService,
@@ -39,7 +36,7 @@ class ChatProvider extends ChangeNotifier with WidgetsBindingObserver {
   String? get pendingImageBase64 => _pendingImageBase64;
   String? get pendingFileName => _pendingFileName;
   String? get searxngUrl => _searxngUrl;
-  double? get lastTokensPerSec => _isStreaming ? _liveTokensPerSec : _lastTokensPerSec;
+  double? get lastTokensPerSec => _lastTokensPerSec;
 
   void setService(OllamaService service) {
     _service = service;
@@ -162,9 +159,6 @@ class ChatProvider extends ChangeNotifier with WidgetsBindingObserver {
     }
 
     _lastTokensPerSec = null;
-    _liveTokensPerSec = null;
-    _streamTokenCount = 0;
-    _streamStartTime = null;
     _isStreaming = true;
     notifyListeners();
 
@@ -182,9 +176,6 @@ class ChatProvider extends ChangeNotifier with WidgetsBindingObserver {
       }
     } finally {
       _cancelPersistTimer();
-      _liveTokensPerSec = null;
-      _streamTokenCount = 0;
-      _streamStartTime = null;
       _isStreaming = false;
       notifyListeners();
       _persist();
@@ -207,9 +198,6 @@ class ChatProvider extends ChangeNotifier with WidgetsBindingObserver {
 
     // Tool-calling loop: may iterate if model requests tool calls
     for (var iteration = 0; iteration < 5; iteration++) {
-      _streamTokenCount = 0;
-      _streamStartTime = null;
-      _liveTokensPerSec = null;
       final assistantMessage = ChatMessage(role: 'assistant', content: '');
       conv.messages.add(assistantMessage);
       notifyListeners();
@@ -236,13 +224,11 @@ class ChatProvider extends ChangeNotifier with WidgetsBindingObserver {
       )) {
         if (event.contentToken != null) {
           assistantMessage.content += event.contentToken!;
-          _incrementLiveTokenCount();
           notifyListeners();
         }
         if (event.thinkingToken != null) {
           assistantMessage.thinking =
               (assistantMessage.thinking ?? '') + event.thinkingToken!;
-          _incrementLiveTokenCount();
           notifyListeners();
         }
         if (event.toolCalls != null) {
@@ -411,15 +397,6 @@ class ChatProvider extends ChangeNotifier with WidgetsBindingObserver {
 
   Future<void> _persist() async {
     await _storageService?.saveConversations(_conversations);
-  }
-
-  void _incrementLiveTokenCount() {
-    _streamTokenCount++;
-    _streamStartTime ??= DateTime.now();
-    final elapsed = DateTime.now().difference(_streamStartTime!).inMilliseconds;
-    if (elapsed >= 1000) {
-      _liveTokensPerSec = _streamTokenCount / (elapsed / 1000.0);
-    }
   }
 
   void _cleanUpInterruptedMessages() {
