@@ -57,7 +57,7 @@ class ModelProvider extends ChangeNotifier {
     _capabilitiesLoading.add(model);
     try {
       final info = await service.fetchModelInfo(model);
-      _capabilities[model] = _parseCapabilities(info);
+      _capabilities[model] = _parseCapabilities(info, model);
       notifyListeners();
     } catch (_) {
       _capabilities[model] = const ModelCapabilities();
@@ -66,7 +66,7 @@ class ModelProvider extends ChangeNotifier {
     }
   }
 
-  ModelCapabilities _parseCapabilities(Map<String, dynamic> info) {
+  ModelCapabilities _parseCapabilities(Map<String, dynamic> info, String model) {
     final caps = info['capabilities'] as List<dynamic>? ?? [];
     final capStrings = caps.map((e) => e.toString()).toSet();
 
@@ -77,14 +77,14 @@ class ModelProvider extends ChangeNotifier {
 
     String? thinkingMode;
     if (supportsThinking) {
-      final family =
-          (info['model_info'] as Map<String, dynamic>?)?['general.family']
-              as String?;
-      // QwQ models support thinking levels; others use boolean toggle
-      if (family != null && family.toLowerCase().contains('qwen')) {
+      final lowerModel = model.toLowerCase();
+      // GPT-OSS models support effort levels (low, medium, high) but can't
+      // disable thinking. Most other thinking models (Qwen 3, DeepSeek R1,
+      // LFM, etc.) think by default and don't accept the think parameter.
+      if (lowerModel.startsWith('gpt-oss')) {
         thinkingMode = 'levels';
       } else {
-        thinkingMode = 'boolean';
+        thinkingMode = 'always';
       }
     }
 

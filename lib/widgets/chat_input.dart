@@ -38,7 +38,12 @@ class _ChatInputState extends State<ChatInput> {
 
     final caps = modelProvider.getCapabilities(conversation.model);
     final hasVision = caps?.supportsVision ?? false;
-    final hasThinking = caps?.supportsThinking ?? false;
+    final hasThinkingLevels = caps?.thinkingMode == 'levels';
+    // Clear stale thinking settings for models that don't support levels
+    if (!hasThinkingLevels && conversation.thinkingEnabled) {
+      conversation.thinkingEnabled = false;
+      conversation.thinkingLevel = null;
+    }
     final hasTools = caps?.supportsTools ?? false;
     final hasSearxng = chatProvider.searxngUrl != null;
     final showSearchChip = hasTools && hasSearxng;
@@ -118,12 +123,12 @@ class _ChatInputState extends State<ChatInput> {
                   ),
                 ),
               // Feature toggles
-              if (hasThinking || showSearchChip)
+              if (hasThinkingLevels || showSearchChip)
                 Padding(
                   padding: const EdgeInsets.only(bottom: 8),
                   child: Row(
                     children: [
-                      if (hasThinking) ...[
+                      if (hasThinkingLevels) ...[
                         _buildThinkingDropdown(conversation, colors, theme),
                         const SizedBox(width: 8),
                       ],
@@ -263,17 +268,18 @@ class _ChatInputState extends State<ChatInput> {
     ColorScheme colors,
     ThemeData theme,
   ) {
-    final levels = ['off', 'low', 'medium', 'high'];
-    final currentLevel = conversation.thinkingEnabled
-        ? (conversation.thinkingLevel ?? 'medium')
-        : 'off';
+    // Levels mode: always on, no off option (GPT-OSS etc.)
+    final levels = ['low', 'medium', 'high'];
+    if (!conversation.thinkingEnabled) {
+      conversation.thinkingEnabled = true;
+      conversation.thinkingLevel ??= 'medium';
+    }
+    final currentLevel = conversation.thinkingLevel ?? 'medium';
 
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 10),
       decoration: BoxDecoration(
-        color: conversation.thinkingEnabled
-            ? colors.secondaryContainer
-            : colors.surfaceContainerHigh,
+        color: colors.secondaryContainer,
         borderRadius: BorderRadius.circular(8),
       ),
       child: Row(
@@ -282,9 +288,7 @@ class _ChatInputState extends State<ChatInput> {
           Icon(
             Icons.psychology_outlined,
             size: 18,
-            color: conversation.thinkingEnabled
-                ? colors.onSecondaryContainer
-                : colors.onSurface,
+            color: colors.onSecondaryContainer,
           ),
           const SizedBox(width: 4),
           DropdownButton<String>(
@@ -304,13 +308,7 @@ class _ChatInputState extends State<ChatInput> {
                 .toList(),
             onChanged: (value) {
               setState(() {
-                if (value == 'off') {
-                  conversation.thinkingEnabled = false;
-                  conversation.thinkingLevel = null;
-                } else {
-                  conversation.thinkingEnabled = true;
-                  conversation.thinkingLevel = value;
-                }
+                conversation.thinkingLevel = value;
               });
             },
           ),

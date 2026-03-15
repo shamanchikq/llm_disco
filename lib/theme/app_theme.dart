@@ -90,7 +90,7 @@ class AppTheme {
       outlineVariant: _outlineVariant,
     ),
 
-    // AppBar — flat, dark
+    // AppBar: flat, dark
     appBarTheme: const AppBarTheme(
       elevation: 0,
       scrolledUnderElevation: 0,
@@ -99,7 +99,7 @@ class AppTheme {
       centerTitle: false,
     ),
 
-    // Card — flat with subtle border
+    // Card, flat with subtle border
     cardTheme: CardThemeData(
       elevation: 0,
       color: _surfaceContainer,
@@ -110,7 +110,7 @@ class AppTheme {
       margin: EdgeInsets.zero,
     ),
 
-    // Input — filled, no border, rounded
+    // Input: filled, no border, rounded
     inputDecorationTheme: InputDecorationTheme(
       filled: true,
       fillColor: _surfaceContainer,
@@ -132,7 +132,7 @@ class AppTheme {
       prefixIconColor: _onSurfaceMuted,
     ),
 
-    // Elevated button — primary fill, flat
+    // Elevated button - primary fill, flat
     elevatedButtonTheme: ElevatedButtonThemeData(
       style: ElevatedButton.styleFrom(
         backgroundColor: _primary,
@@ -146,7 +146,7 @@ class AppTheme {
       ),
     ),
 
-    // FAB — rounded square
+    // FAB - rounded square
     floatingActionButtonTheme: const FloatingActionButtonThemeData(
       elevation: 0,
       hoverElevation: 0,
@@ -159,14 +159,14 @@ class AppTheme {
       ),
     ),
 
-    // Icon button — muted
+    // Icon button - muted
     iconButtonTheme: IconButtonThemeData(
       style: IconButton.styleFrom(
         foregroundColor: _onSurfaceMuted,
       ),
     ),
 
-    // ListTile — rounded, muted secondary text
+    // ListTile - rounded, muted secondary text
     listTileTheme: ListTileThemeData(
       shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.circular(12),
@@ -175,7 +175,7 @@ class AppTheme {
       subtitleTextStyle: const TextStyle(color: _onSurfaceMuted, fontSize: 13),
     ),
 
-    // Switch — primary thumb
+    // Switch - primary thumb
     switchTheme: SwitchThemeData(
       thumbColor: WidgetStateProperty.resolveWith((states) {
         if (states.contains(WidgetState.selected)) return _primary;
@@ -189,7 +189,7 @@ class AppTheme {
       }),
     ),
 
-    // Snackbar — floating, rounded, dark
+    // Snackbar - floating, rounded, dark
     snackBarTheme: SnackBarThemeData(
       behavior: SnackBarBehavior.floating,
       backgroundColor: _surfaceContainerHighest,
@@ -219,7 +219,7 @@ class AppTheme {
       ),
     ),
 
-    // Text theme — improved readability
+    // Text theme - improved readability
     textTheme: const TextTheme(
       headlineSmall: TextStyle(
         fontWeight: FontWeight.bold,

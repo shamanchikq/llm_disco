@@ -41,10 +41,6 @@ class _MainScreenState extends State<MainScreen> {
     final theme = Theme.of(context);
     final colors = theme.colorScheme;
 
-    // Select only stable conversation properties for the Scaffold/AppBar.
-    // These don't change during streaming, so the Scaffold (and its drawer
-    // overlay + focus tree) stays stable — prevents FocusInheritedScope
-    // corruption when the drawer is open during generation.
     final conversationId = context.select<ChatProvider, String?>(
       (p) => p.activeConversation?.id,
     );

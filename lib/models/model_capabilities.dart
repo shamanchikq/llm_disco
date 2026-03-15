@@ -1,7 +1,7 @@
 class ModelCapabilities {
   final bool supportsVision;
   final bool supportsThinking;
-  final String? thinkingMode; // 'boolean' or 'levels'
+  final String? thinkingMode; // 'always' (no toggle) or 'levels' (effort selector)
   final bool supportsTools;
   final bool supportsFiles;
 

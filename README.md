@@ -1,6 +1,6 @@
 # LLM Disco
 
-A Flutter mobile app for chatting with locally-hosted large language models via [Ollama](https://ollama.com). Run your favourite model on your PC and talk to it from your phone over your home network — no cloud, no subscriptions, no data leaving your device.
+A Flutter mobile app for chatting with locally-hosted large language models via [Ollama](https://ollama.com). Run your favourite model on your PC and talk to it from your phone over your home network.
 
 Built as my Final Year Project at Maynooth University (BSc Computer Science, 2025–2026).
 
@@ -8,14 +8,14 @@ Built as my Final Year Project at Maynooth University (BSc Computer Science, 202
 
 ## Features
 
-- **Real-time streaming chat** — tokens appear as they are generated
-- **Model selection** — switch between any model installed on your Ollama server
-- **Image & file attachments** — send photos or files to vision-capable models
-- **Extended thinking mode** — see the model's reasoning process (Qwen, QwQ)
-- **Web search** — models can search the web via a self-hosted SearXNG instance using tool-calling
-- **Model management** — browse, download, and delete models directly from the app
-- **Conversation persistence** — chats are saved locally on your device
-- **Multiple server profiles** — save and switch between different Ollama instances
+- **Real-time streaming chat** - tokens appear as they are generated
+- **Model selection** - switch between any model installed on your Ollama server
+- **Image & file attachments** - send photos or files to vision-capable models
+- **Extended thinking mode** - see the model's reasoning process (Qwen, QwQ)
+- **Web search** - models can search the web via a self-hosted SearXNG instance using tool-calling
+- **Model management** - browse, download, and delete models directly from the app
+- **Conversation persistence** - chats are saved locally on your device
+- **Multiple server profiles** - save and switch between different Ollama instances
 - **Dark theme** with syntax-highlighted code blocks
 
 ## Requirements
@@ -58,12 +58,12 @@ test/            # Unit tests, widget tests, screen tests
 
 ## Tech Stack
 
-- **Flutter / Dart** — UI and app logic
-- **Provider** — state management
-- **http** — streaming HTTP for Ollama API
-- **flutter_markdown** — markdown rendering in chat
-- **image_picker / file_picker** — attachments
-- **path_provider** — local JSON storage
+- **Flutter / Dart** - UI and app logic
+- **Provider** - state management
+- **http** - streaming HTTP for Ollama API
+- **flutter_markdown** - markdown rendering in chat
+- **image_picker / file_picker** - attachments
+- **path_provider** - local JSON storage
 
 ## Note on Commit History
 

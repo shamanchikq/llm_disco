@@ -289,7 +289,7 @@ class OllamaService {
     final html = response.body;
     final results = <OllamaSearchResult>[];
 
-    // Match model entries — each model is in an <a href="/library/..."> block
+    // Match model entries, each model is in an <a href="/library/..."> block
     final blockPattern = RegExp(
       r'<a[^>]*href="/library/([^"]+)"[^>]*>([\s\S]*?)</a>',
     );
@@ -305,7 +305,7 @@ class OllamaService {
         description = descMatch.group(1)?.replaceAll(RegExp(r'<[^>]+>'), '').trim();
       }
 
-      // Extract pull count (e.g. "110M Pulls" or "1.2B Pulls")
+      // Extract pull count
       String? pullCount;
       final pullMatch = RegExp(r'([\d.]+[KMB]?)\s*Pull', caseSensitive: false).firstMatch(block);
       if (pullMatch != null) {
@@ -345,8 +345,6 @@ class OllamaService {
     final tags = <ModelTag>[];
     final seen = <String>{};
 
-    // Each tag is in an <a href="/library/modelName:tag"> block
-    // Content: "modelName:tag \n hash • 3.3GB • 128K context window • ..."
     final blockPattern = RegExp(
       r'<a[^>]*href="/library/'
       '${RegExp.escape(modelName)}:([^"]+)"'

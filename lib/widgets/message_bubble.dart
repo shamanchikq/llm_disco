@@ -109,7 +109,7 @@ class MessageBubble extends StatelessWidget {
       );
     }
 
-    // Assistant or error message — no visible bubble
+    // Assistant or error message, no visible bubble
     return Align(
       alignment: Alignment.centerLeft,
       child: Container(

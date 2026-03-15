@@ -185,7 +185,6 @@ class ChatProvider extends ChangeNotifier with WidgetsBindingObserver {
   Future<void> _streamResponse() async {
     final conv = _activeConversation!;
 
-    final bool thinkingEnabled = conv.thinkingEnabled;
     final bool webSearchEnabled = conv.webSearchEnabled;
 
     // Build tools list if web search is enabled
@@ -217,8 +216,8 @@ class ChatProvider extends ChangeNotifier with WidgetsBindingObserver {
       await for (final event in _service!.streamChat(
         conv.model,
         messagesToSend,
-        think: thinkingEnabled ? true : null,
-        thinkingLevel: thinkingEnabled ? conv.thinkingLevel : null,
+        think: conv.thinkingEnabled && conv.thinkingLevel != null ? true : null,
+        thinkingLevel: conv.thinkingEnabled ? conv.thinkingLevel : null,
         tools: tools,
         numCtx: conv.numCtx,
       )) {
