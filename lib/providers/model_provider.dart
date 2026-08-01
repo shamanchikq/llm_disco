@@ -9,6 +9,8 @@ class ModelProvider extends ChangeNotifier {
   String? _error;
   final Map<String, ModelCapabilities> _capabilities = {};
   final Set<String> _capabilitiesLoading = {};
+  final Map<String, DateTime> _capabilitiesFailedAt = {};
+  static const _retryCooldown = Duration(seconds: 30);
 
   bool _isPulling = false;
   String _pullStatus = '';
@@ -36,8 +38,14 @@ class ModelProvider extends ChangeNotifier {
     try {
       _models = await service.fetchModels();
       if (_models.isNotEmpty) {
-        _selectedModel = _models.first;
+        // Keep the user's selection across refetches (e.g. after a pull);
+        // only fall back to the first model when it's gone or unset.
+        if (_selectedModel == null || !_models.contains(_selectedModel)) {
+          _selectedModel = _models.first;
+        }
         fetchCapabilities(service, _selectedModel!);
+      } else {
+        _selectedModel = null;
       }
     } catch (e) {
       _error = 'Failed to load models: $e';
@@ -53,16 +61,27 @@ class ModelProvider extends ChangeNotifier {
         _capabilitiesLoading.contains(model)) {
       return;
     }
+    // After a failed fetch, wait out the cooldown before retrying so a dead
+    // server isn't hammered on every rebuild.
+    final failedAt = _capabilitiesFailedAt[model];
+    if (failedAt != null &&
+        DateTime.now().difference(failedAt) < _retryCooldown) {
+      return;
+    }
 
     _capabilitiesLoading.add(model);
     try {
       final info = await service.fetchModelInfo(model);
       _capabilities[model] = _parseCapabilities(info, model);
-      notifyListeners();
+      _capabilitiesFailedAt.remove(model);
     } catch (_) {
-      _capabilities[model] = const ModelCapabilities();
+      // Leave the entry absent so the fetch is retried later — caching
+      // all-false capabilities would permanently hide vision/thinking UI
+      // for the model after one transient network error.
+      _capabilitiesFailedAt[model] = DateTime.now();
     } finally {
       _capabilitiesLoading.remove(model);
+      notifyListeners();
     }
   }
 
@@ -73,18 +92,18 @@ class ModelProvider extends ChangeNotifier {
     final supportsVision = capStrings.contains('vision');
     final supportsTools = capStrings.contains('tools');
     final supportsThinking = capStrings.contains('thinking');
-    final supportsFiles = capStrings.contains('files');
+    final supportsAudio = capStrings.contains('audio');
 
     String? thinkingMode;
     if (supportsThinking) {
       final lowerModel = model.toLowerCase();
-      // GPT-OSS models support effort levels (low, medium, high) but can't
-      // disable thinking. Most other thinking models (Qwen 3, DeepSeek R1,
-      // LFM, etc.) think by default and don't accept the think parameter.
+      // GPT-OSS models expose effort levels but can't disable thinking.
+      // Every other thinking-capable model accepts think true/false (and
+      // optionally an effort level) via the Ollama API.
       if (lowerModel.startsWith('gpt-oss')) {
         thinkingMode = 'levels';
       } else {
-        thinkingMode = 'always';
+        thinkingMode = 'toggle';
       }
     }
 
@@ -93,7 +112,7 @@ class ModelProvider extends ChangeNotifier {
       supportsThinking: supportsThinking,
       thinkingMode: thinkingMode,
       supportsTools: supportsTools,
-      supportsFiles: supportsFiles,
+      supportsAudio: supportsAudio,
     );
   }
 
@@ -148,6 +167,7 @@ class ModelProvider extends ChangeNotifier {
     _error = null;
     _capabilities.clear();
     _capabilitiesLoading.clear();
+    _capabilitiesFailedAt.clear();
     notifyListeners();
   }
 }

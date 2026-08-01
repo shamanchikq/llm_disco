@@ -22,7 +22,7 @@ void main() {
         .thenAnswer((_) async => <Map<String, dynamic>>[]);
   });
 
-  Widget buildScreen() {
+  Widget buildScreen({bool autoConnect = true}) {
     chatProvider = ChatProvider();
     return MultiProvider(
       providers: [
@@ -33,7 +33,7 @@ void main() {
       ],
       child: MaterialApp(
         theme: AppTheme.dark,
-        home: const ConnectionScreen(),
+        home: ConnectionScreen(autoConnect: autoConnect),
       ),
     );
   }
@@ -57,6 +57,30 @@ void main() {
         find.widgetWithText(TextField, 'Port'),
       );
       expect(portField.controller!.text, '11434');
+    });
+
+    testWidgets('auto-connects with saved settings on launch', (tester) async {
+      when(() => mockStorage.loadConnectionSettings()).thenAnswer((_) async =>
+          {'ip': '10.0.0.5', 'port': '11434', 'useHttp': true});
+
+      await tester.pumpWidget(buildScreen());
+      await tester.pumpAndSettle();
+
+      // The widget-test HTTP client refuses real connections, so a triggered
+      // auto-connect surfaces as a connection error on screen.
+      expect(find.textContaining('Could not connect'), findsWidgets);
+    });
+
+    testWidgets('autoConnect: false only prefills the saved settings',
+        (tester) async {
+      when(() => mockStorage.loadConnectionSettings()).thenAnswer((_) async =>
+          {'ip': '10.0.0.5', 'port': '11434', 'useHttp': true});
+
+      await tester.pumpWidget(buildScreen(autoConnect: false));
+      await tester.pumpAndSettle();
+
+      expect(find.textContaining('Could not connect'), findsNothing);
+      expect(find.widgetWithText(TextField, '10.0.0.5'), findsOneWidget);
     });
 
     testWidgets('empty IP shows validation error', (tester) async {

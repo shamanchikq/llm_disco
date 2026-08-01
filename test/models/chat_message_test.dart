@@ -47,6 +47,41 @@ void main() {
       expect(restored.toolCalls!.first['function']['name'], 'web_search');
     });
 
+    test('isError round-trips through json and defaults to false', () {
+      final err = ChatMessage(
+          role: 'assistant', content: 'Connection refused', isError: true);
+      expect(ChatMessage.fromJson(err.toJson()).isError, isTrue);
+
+      final ok = ChatMessage(role: 'assistant', content: 'hi');
+      expect(ok.isError, isFalse);
+      expect(ChatMessage.fromJson(ok.toJson()).isError, isFalse);
+      expect(ok.toJson().containsKey('isError'), isFalse);
+    });
+
+    test('toApiMap includes tool_calls so history round-trips to Ollama', () {
+      // Ollama's chat API expects the assistant message that requested a
+      // tool to be echoed back with its tool_calls before the tool result.
+      final toolCalls = [
+        {
+          'function': {
+            'name': 'web_search',
+            'arguments': {'query': 'dart'},
+          },
+        },
+      ];
+      final msg = ChatMessage(
+        role: 'assistant',
+        content: '',
+        toolCalls: toolCalls,
+      );
+
+      expect(msg.toApiMap()['tool_calls'], toolCalls);
+
+      // messages without tool calls must not gain the key
+      final plain = ChatMessage(role: 'assistant', content: 'hi');
+      expect(plain.toApiMap().containsKey('tool_calls'), isFalse);
+    });
+
     test('toApiMap with and without images', () {
       final plain = ChatMessage(
         role: 'user',

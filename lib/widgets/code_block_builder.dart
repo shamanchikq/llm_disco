@@ -1,7 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:flutter_markdown/flutter_markdown.dart';
+import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
 import 'package:markdown/markdown.dart' as md;
+import '../theme/app_theme.dart';
 
 class CodeBlockBuilder extends MarkdownElementBuilder {
   @override
@@ -30,32 +31,15 @@ class CodeBlockBuilder extends MarkdownElementBuilder {
       }
     }
 
-    final theme = Theme.of(context);
-
-    return _CodeBlockWithCopy(
-      code: code,
-      language: language,
-      backgroundColor: theme.colorScheme.surfaceContainerHigh,
-      textColor: theme.colorScheme.onSurface,
-      labelColor: theme.colorScheme.onSurface.withValues(alpha: 0.5),
-    );
+    return _CodeBlockWithCopy(code: code, language: language);
   }
 }
 
 class _CodeBlockWithCopy extends StatefulWidget {
   final String code;
   final String? language;
-  final Color backgroundColor;
-  final Color textColor;
-  final Color labelColor;
 
-  const _CodeBlockWithCopy({
-    required this.code,
-    this.language,
-    required this.backgroundColor,
-    required this.textColor,
-    required this.labelColor,
-  });
+  const _CodeBlockWithCopy({required this.code, this.language});
 
   @override
   State<_CodeBlockWithCopy> createState() => _CodeBlockWithCopyState();
@@ -74,63 +58,72 @@ class _CodeBlockWithCopyState extends State<_CodeBlockWithCopy> {
 
   @override
   Widget build(BuildContext context) {
-    return Stack(
-      children: [
-        Container(
-          width: double.infinity,
-          padding: const EdgeInsets.all(12),
-          decoration: BoxDecoration(
-            color: widget.backgroundColor,
-            borderRadius: BorderRadius.circular(8),
-          ),
-          child: SingleChildScrollView(
-            scrollDirection: Axis.horizontal,
-            child: SelectableText(
-              widget.code,
-              style: TextStyle(
-                color: widget.textColor,
-                fontFamily: 'monospace',
-                fontSize: 14,
-                height: 1.5,
-              ),
+    final theme = Theme.of(context);
+    final colors = theme.colorScheme;
+    final tokens = theme.extension<DiscoTokens>()!;
+
+    return Container(
+      width: double.infinity,
+      margin: const EdgeInsets.symmetric(vertical: 4),
+      clipBehavior: Clip.antiAlias,
+      decoration: BoxDecoration(
+        color: colors.surfaceContainer,
+        borderRadius: BorderRadius.circular(11),
+        border: Border.all(color: tokens.line),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Container(
+            padding: const EdgeInsets.fromLTRB(11, 4, 4, 4),
+            decoration: BoxDecoration(
+              border: Border(bottom: BorderSide(color: tokens.line)),
             ),
-          ),
-        ),
-        Positioned(
-          top: 4,
-          right: 4,
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              if (widget.language != null)
-                Padding(
-                  padding: const EdgeInsets.only(right: 4),
-                  child: Text(
-                    widget.language!,
-                    style: TextStyle(
-                      color: widget.labelColor,
+            child: Row(
+              children: [
+                Text(
+                  widget.language ?? 'code',
+                  style: AppTheme.mono(fontSize: 11, color: tokens.textMuted),
+                ),
+                const Spacer(),
+                TextButton.icon(
+                  onPressed: _copy,
+                  style: TextButton.styleFrom(
+                    foregroundColor: tokens.textFaint,
+                    padding: const EdgeInsets.symmetric(horizontal: 8),
+                    minimumSize: const Size(0, 30),
+                    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                  ),
+                  icon: Icon(
+                    _copied ? Icons.check : Icons.copy_rounded,
+                    size: 13,
+                    color: _copied ? colors.primary : tokens.textFaint,
+                  ),
+                  label: Text(
+                    _copied ? 'Copied' : 'Copy',
+                    style: AppTheme.mono(
                       fontSize: 11,
-                      fontWeight: FontWeight.w500,
+                      color: _copied ? colors.primary : tokens.textFaint,
                     ),
                   ),
                 ),
-              SizedBox(
-                width: 28,
-                height: 28,
-                child: IconButton(
-                  padding: EdgeInsets.zero,
-                  iconSize: 16,
-                  icon: Icon(
-                    _copied ? Icons.check : Icons.copy_rounded,
-                    color: widget.labelColor,
-                  ),
-                  onPressed: _copy,
-                ),
-              ),
-            ],
+              ],
+            ),
           ),
-        ),
-      ],
+          SingleChildScrollView(
+            scrollDirection: Axis.horizontal,
+            padding: const EdgeInsets.symmetric(horizontal: 13, vertical: 11),
+            child: SelectableText(
+              widget.code,
+              style: AppTheme.mono(
+                fontSize: 12.5,
+                height: 1.6,
+                color: colors.onSurface,
+              ),
+            ),
+          ),
+        ],
+      ),
     );
   }
 }

@@ -1,8 +1,9 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:flutter_markdown/flutter_markdown.dart';
+import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
 import 'package:url_launcher/url_launcher.dart';
 import '../models/chat_message.dart';
 import '../theme/app_theme.dart';
@@ -13,234 +14,338 @@ class MessageBubble extends StatelessWidget {
   final bool isStreaming;
   final VoidCallback? onRetry;
 
-  const MessageBubble({super.key, required this.message, this.isStreaming = false, this.onRetry});
+  /// Offered on long-press of user messages: edit the text and resend.
+  final VoidCallback? onEdit;
+
+  /// Offered on long-press of user messages: delete this message together
+  /// with its response.
+  final VoidCallback? onDelete;
+
+  /// Model name shown in the assistant flag header.
+  final String? modelName;
+
+  /// Optional metadata line (e.g. "42.6 tok/s") under the last response.
+  final String? metaLabel;
+
+  const MessageBubble({
+    super.key,
+    required this.message,
+    this.isStreaming = false,
+    this.onRetry,
+    this.onEdit,
+    this.onDelete,
+    this.modelName,
+    this.metaLabel,
+  });
+
+  void _copyToClipboard(BuildContext context) {
+    Clipboard.setData(ClipboardData(text: message.content));
+    ScaffoldMessenger.of(context)
+      ..clearSnackBars()
+      ..showSnackBar(const SnackBar(
+        content: Text('Copied to clipboard'),
+        duration: Duration(seconds: 1),
+      ));
+  }
 
   @override
   Widget build(BuildContext context) {
     final isUser = message.role == 'user';
-    final isError = message.content.startsWith('[Error:');
-    final msgColors = Theme.of(context).extension<MessageColors>()!;
+    final isError = message.isError;
     final theme = Theme.of(context);
+    final msgColors = theme.extension<MessageColors>()!;
+    final tokens = theme.extension<DiscoTokens>()!;
 
     if (isUser) {
-      return Align(
-        alignment: Alignment.centerRight,
-        child: GestureDetector(
-          onLongPress: () {
-            Clipboard.setData(ClipboardData(text: message.content));
-            ScaffoldMessenger.of(context)
-              ..clearSnackBars()
-              ..showSnackBar(const SnackBar(
-                content: Text('Copied to clipboard'),
-                duration: Duration(seconds: 1),
-              ));
-          },
+      final bubble = GestureDetector(
+          onLongPress: () => onEdit != null
+              ? _showUserMessageOptions(context)
+              : _copyToClipboard(context),
           child: Container(
-          constraints: BoxConstraints(
-            maxWidth: MediaQuery.of(context).size.width * 0.78,
-          ),
-          margin: const EdgeInsets.only(top: 4, bottom: 4, left: 48),
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-          decoration: BoxDecoration(
-            color: msgColors.userBubble,
-            borderRadius: BorderRadius.circular(18),
-          ),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.end,
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              if (message.images != null && message.images!.isNotEmpty)
-                Padding(
-                  padding: const EdgeInsets.only(bottom: 8),
-                  child: ClipRRect(
-                    borderRadius: BorderRadius.circular(12),
-                    child: _CachedBase64Image(
-                      base64Data: message.images!.first,
-                      width: 200,
+            constraints: BoxConstraints(
+              maxWidth: MediaQuery.of(context).size.width * 0.85,
+            ),
+            margin: const EdgeInsets.only(top: 6, left: 48),
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 11),
+            decoration: BoxDecoration(
+              color: msgColors.userBubble,
+              borderRadius: BorderRadius.only(
+                topLeft: Radius.circular(tokens.radius),
+                topRight: Radius.circular(tokens.radius),
+                bottomRight: const Radius.circular(7),
+                bottomLeft: Radius.circular(tokens.radius),
+              ),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                if (message.images != null && message.images!.isNotEmpty)
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 9),
+                    child: Wrap(
+                      spacing: 6,
+                      runSpacing: 6,
+                      children: [
+                        for (final img in message.images!)
+                          Container(
+                            decoration: BoxDecoration(
+                              borderRadius: BorderRadius.circular(12),
+                              border: Border.all(color: tokens.lineStrong),
+                            ),
+                            clipBehavior: Clip.antiAlias,
+                            child: _CachedBase64Image(
+                              base64Data: img,
+                              width:
+                                  message.images!.length == 1 ? 180 : 110,
+                            ),
+                          ),
+                      ],
                     ),
                   ),
-                ),
-              if (message.files != null && message.files!.isNotEmpty)
-                Padding(
-                  padding: const EdgeInsets.only(bottom: 8),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: message.files!.map((file) {
-                      return Padding(
-                        padding: const EdgeInsets.only(bottom: 4),
-                        child: Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Icon(
-                              Icons.attach_file_rounded,
-                              size: 14,
-                              color: msgColors.userText.withValues(alpha: 0.7),
-                            ),
-                            const SizedBox(width: 4),
-                            Flexible(
-                              child: Text(
-                                file['name'] ?? 'file',
-                                style: TextStyle(
-                                  color: msgColors.userText.withValues(alpha: 0.7),
-                                  fontSize: 13,
-                                ),
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                              ),
-                            ),
-                          ],
-                        ),
-                      );
-                    }).toList(),
+                if (message.files != null && message.files!.isNotEmpty)
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 9),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: message.files!.map((file) {
+                        return Padding(
+                          padding: const EdgeInsets.only(bottom: 4),
+                          child: _FileChip(
+                            name: file['name'] ?? 'file',
+                            tokens: tokens,
+                            textColor: msgColors.userText,
+                            accent: theme.colorScheme.primary,
+                          ),
+                        );
+                      }).toList(),
+                    ),
+                  ),
+                SelectableText(
+                  message.content.isEmpty ? '...' : message.content,
+                  style: TextStyle(
+                    color: msgColors.userText,
+                    fontSize: 15,
+                    height: 1.5,
                   ),
                 ),
-              SelectableText(
-                message.content.isEmpty ? '...' : message.content,
-                style: TextStyle(
-                  color: msgColors.userText,
-                  fontSize: 15,
-                  height: 1.5,
-                ),
-              ),
-            ],
+              ],
+            ),
           ),
-        ),
+        );
+
+      // Visible action row so edit/copy are discoverable without
+      // long-pressing (long-press still opens the options sheet).
+      return Align(
+        alignment: Alignment.centerRight,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.end,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            bubble,
+            Padding(
+              padding: const EdgeInsets.only(bottom: 4),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  _MetaAction(
+                    icon: Icons.copy_rounded,
+                    tooltip: 'Copy',
+                    color: tokens.textFaint,
+                    onTap: () => _copyToClipboard(context),
+                  ),
+                  if (onEdit != null)
+                    _MetaAction(
+                      icon: Icons.edit_outlined,
+                      tooltip: 'Edit & resend',
+                      color: tokens.textFaint,
+                      onTap: onEdit!,
+                    ),
+                ],
+              ),
+            ),
+          ],
         ),
       );
     }
 
-    // Assistant or error message, no visible bubble
-    return Align(
-      alignment: Alignment.centerLeft,
-      child: Container(
-        constraints: BoxConstraints(
-          maxWidth: MediaQuery.of(context).size.width * 0.88,
-        ),
-        margin: const EdgeInsets.only(top: 4, bottom: 4, right: 32),
-        padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 6),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Row(
-              children: [
-                Icon(
-                  Icons.auto_awesome,
-                  size: 13,
-                  color: theme.colorScheme.primary.withValues(alpha: 0.6),
+    // Assistant or error message: full-width, flag header + content + meta
+    return Container(
+      margin: const EdgeInsets.symmetric(vertical: 8),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          // Flag header: glyph + model name
+          Row(
+            children: [
+              Container(
+                width: 18,
+                height: 18,
+                decoration: BoxDecoration(
+                  color: tokens.accentSoft,
+                  borderRadius: BorderRadius.circular(5),
                 ),
-                const SizedBox(width: 4),
-                Text(
-                  'Assistant',
-                  style: TextStyle(
-                    color: theme.colorScheme.primary.withValues(alpha: 0.6),
-                    fontSize: 12,
-                    fontWeight: FontWeight.w500,
-                  ),
+                child: Icon(
+                  Icons.view_in_ar_rounded,
+                  size: 12,
+                  color: theme.colorScheme.primary,
                 ),
-                const Spacer(),
-                if (message.content.isNotEmpty && !isError)
-                  SizedBox(
-                    width: 28,
-                    height: 28,
-                    child: IconButton(
-                      padding: EdgeInsets.zero,
-                      iconSize: 14,
-                      icon: Icon(
-                        Icons.copy_rounded,
-                        color: theme.colorScheme.primary.withValues(alpha: 0.5),
-                      ),
-                      onPressed: () {
-                        Clipboard.setData(
-                            ClipboardData(text: message.content));
-                        ScaffoldMessenger.of(context)
-                          ..clearSnackBars()
-                          ..showSnackBar(const SnackBar(
-                            content: Text('Copied to clipboard'),
-                            duration: Duration(seconds: 1),
-                          ));
-                      },
-                    ),
-                  ),
-              ],
-            ),
-            const SizedBox(height: 4),
-            if (message.thinking != null && message.thinking!.isNotEmpty)
-              Padding(
-                padding: const EdgeInsets.only(bottom: 8),
-                child: _ThinkingSection(thinking: message.thinking!),
               ),
-            if (message.content.isEmpty)
-              Text(
-                '...',
-                style: TextStyle(
-                  color: msgColors.assistantText,
-                  fontSize: 15,
-                  height: 1.5,
-                ),
-              )
-            else if (isError)
-              SelectableText(
-                message.content,
-                style: TextStyle(
-                  color: msgColors.errorText,
-                  fontSize: 15,
-                  height: 1.5,
-                ),
-              )
-            else if (isStreaming)
-              // Use plain Text during streaming to avoid focus node
-              // deactivation issues when MarkdownBody rebuilds rapidly.
-              Text(
-                message.content,
-                style: TextStyle(
-                  color: msgColors.assistantText,
-                  fontSize: 15,
-                  height: 1.5,
-                ),
-              )
-            else
-              MarkdownBody(
-                data: message.content,
-                selectable: true,
-                builders: {'pre': CodeBlockBuilder()},
-                onTapLink: (text, href, title) {
-                  if (href != null) {
-                    launchUrl(Uri.parse(href));
-                  }
-                },
-                styleSheet: _buildMarkdownStyle(theme, msgColors),
-              ),
-            if (isError && onRetry != null) ...[
-              const SizedBox(height: 8),
-              GestureDetector(
-                onTap: onRetry,
-                child: Container(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                  decoration: BoxDecoration(
-                    color: msgColors.errorRetry.withValues(alpha: 0.15),
-                    borderRadius: BorderRadius.circular(16),
+              const SizedBox(width: 7),
+              Flexible(
+                child: Text(
+                  (modelName ?? 'Assistant').toUpperCase(),
+                  style: AppTheme.mono(
+                    fontSize: 10.5,
+                    letterSpacing: 0.5,
+                    color: tokens.textFaint,
                   ),
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Icon(Icons.refresh_rounded,
-                          size: 14, color: msgColors.errorRetry),
-                      const SizedBox(width: 4),
-                      Text(
-                        'Retry',
-                        style: TextStyle(
-                          color: msgColors.errorRetry,
-                          fontSize: 12,
-                          fontWeight: FontWeight.w600,
-                        ),
-                      ),
-                    ],
-                  ),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
                 ),
               ),
             ],
+          ),
+          const SizedBox(height: 9),
+          if (message.thinking != null && message.thinking!.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 12),
+              child: _ThinkingSection(thinking: message.thinking!),
+            ),
+          if (message.content.isEmpty)
+            isStreaming
+                ? const _TypingDots()
+                : Text(
+                    '...',
+                    style: TextStyle(
+                      color: msgColors.assistantText,
+                      fontSize: 15,
+                      height: 1.5,
+                    ),
+                  )
+          else if (isError)
+            SelectableText(
+              message.content,
+              style: TextStyle(
+                color: msgColors.errorText,
+                fontSize: 15,
+                height: 1.5,
+              ),
+            )
+          else if (isStreaming)
+            // Markdown re-rendered on a throttle (non-selectable to avoid
+            // focus-node churn) with a blinking cursor at the tail.
+            _StreamingMarkdown(
+              content: message.content,
+              styleSheet: _buildMarkdownStyle(theme, msgColors, tokens),
+            )
+          else
+            MarkdownBody(
+              data: message.content,
+              selectable: true,
+              builders: {'pre': CodeBlockBuilder()},
+              onTapLink: (text, href, title) {
+                if (href != null) {
+                  launchUrl(Uri.parse(href));
+                }
+              },
+              styleSheet: _buildMarkdownStyle(theme, msgColors, tokens),
+            ),
+          if (isError && onRetry != null) ...[
+            const SizedBox(height: 8),
+            GestureDetector(
+              onTap: onRetry,
+              child: Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                decoration: BoxDecoration(
+                  color: msgColors.errorRetry.withValues(alpha: 0.15),
+                  borderRadius: BorderRadius.circular(16),
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(Icons.refresh_rounded,
+                        size: 14, color: msgColors.errorRetry),
+                    const SizedBox(width: 4),
+                    Text(
+                      'Retry',
+                      style: TextStyle(
+                        color: msgColors.errorRetry,
+                        fontSize: 12,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ],
+          if (!isError && message.content.isNotEmpty && !isStreaming) ...[
+            const SizedBox(height: 6),
+            Row(
+              children: [
+                if (metaLabel != null)
+                  Text(
+                    metaLabel!,
+                    style:
+                        AppTheme.mono(fontSize: 10.5, color: tokens.textFaint),
+                  ),
+                const Spacer(),
+                _MetaAction(
+                  icon: Icons.copy_rounded,
+                  tooltip: 'Copy',
+                  color: tokens.textFaint,
+                  onTap: () => _copyToClipboard(context),
+                ),
+                if (onRetry != null)
+                  _MetaAction(
+                    icon: Icons.refresh_rounded,
+                    tooltip: 'Retry',
+                    color: tokens.textFaint,
+                    onTap: onRetry!,
+                  ),
+              ],
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  void _showUserMessageOptions(BuildContext context) {
+    showModalBottomSheet(
+      context: context,
+      builder: (ctx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              leading: const Icon(Icons.copy_rounded),
+              title: const Text('Copy'),
+              onTap: () {
+                Navigator.pop(ctx);
+                _copyToClipboard(context);
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.edit_outlined),
+              title: const Text('Edit & resend'),
+              onTap: () {
+                Navigator.pop(ctx);
+                onEdit!();
+              },
+            ),
+            if (onDelete != null)
+              ListTile(
+                leading: const Icon(Icons.delete_outline_rounded),
+                title: const Text('Delete message & response'),
+                onTap: () {
+                  Navigator.pop(ctx);
+                  onDelete!();
+                },
+              ),
           ],
         ),
       ),
@@ -248,31 +353,30 @@ class MessageBubble extends StatelessWidget {
   }
 
   MarkdownStyleSheet _buildMarkdownStyle(
-      ThemeData theme, MessageColors msgColors) {
+      ThemeData theme, MessageColors msgColors, DiscoTokens tokens) {
     final textColor = msgColors.assistantText;
     return MarkdownStyleSheet(
-      p: TextStyle(color: textColor, fontSize: 15, height: 1.5),
-      h1: TextStyle(
-          color: textColor, fontSize: 24, fontWeight: FontWeight.bold),
-      h2: TextStyle(
-          color: textColor, fontSize: 21, fontWeight: FontWeight.bold),
-      h3: TextStyle(
-          color: textColor, fontSize: 18, fontWeight: FontWeight.bold),
+      p: TextStyle(color: textColor, fontSize: 15, height: 1.62),
+      h1: AppTheme.display(
+          color: textColor, fontSize: 23, fontWeight: FontWeight.w600),
+      h2: AppTheme.display(
+          color: textColor, fontSize: 20, fontWeight: FontWeight.w600),
+      h3: AppTheme.display(
+          color: textColor, fontSize: 17, fontWeight: FontWeight.w600),
       h4: TextStyle(
-          color: textColor, fontSize: 16, fontWeight: FontWeight.bold),
+          color: textColor, fontSize: 15.5, fontWeight: FontWeight.w600),
       h5: TextStyle(
-          color: textColor, fontSize: 15, fontWeight: FontWeight.bold),
+          color: textColor, fontSize: 15, fontWeight: FontWeight.w600),
       h6: TextStyle(
-          color: textColor, fontSize: 14, fontWeight: FontWeight.bold),
-      code: TextStyle(
+          color: textColor, fontSize: 14, fontWeight: FontWeight.w600),
+      code: AppTheme.mono(
         color: textColor,
-        backgroundColor: theme.colorScheme.surfaceContainerHigh,
-        fontFamily: 'monospace',
-        fontSize: 14,
-      ),
+        fontSize: 12.5,
+      ).copyWith(backgroundColor: theme.colorScheme.surfaceContainerHigh),
       codeblockDecoration: BoxDecoration(
-        color: theme.colorScheme.surfaceContainerHigh,
-        borderRadius: BorderRadius.circular(8),
+        color: theme.colorScheme.surfaceContainer,
+        borderRadius: BorderRadius.circular(11),
+        border: Border.all(color: tokens.line),
       ),
       codeblockPadding: const EdgeInsets.all(12),
       blockquoteDecoration: BoxDecoration(
@@ -281,21 +385,98 @@ class MessageBubble extends StatelessWidget {
         ),
       ),
       blockquotePadding: const EdgeInsets.only(left: 12, top: 4, bottom: 4),
-      blockquote:
-          TextStyle(color: textColor, fontSize: 15, fontStyle: FontStyle.italic),
+      blockquote: TextStyle(
+          color: tokens.textMuted, fontSize: 15, fontStyle: FontStyle.italic),
       a: TextStyle(
           color: theme.colorScheme.primary,
           decoration: TextDecoration.underline),
-      listBullet: TextStyle(color: textColor, fontSize: 15),
+      listBullet: TextStyle(color: theme.colorScheme.primary, fontSize: 15),
       tableHead: TextStyle(
-          color: textColor, fontWeight: FontWeight.bold, fontSize: 14),
+          color: textColor, fontWeight: FontWeight.w600, fontSize: 14),
       tableBody: TextStyle(color: textColor, fontSize: 14),
-      tableBorder: TableBorder.all(
-          color: theme.colorScheme.outlineVariant, width: 1),
+      tableBorder: TableBorder.all(color: tokens.line, width: 1),
       horizontalRuleDecoration: BoxDecoration(
         border: Border(
-          top: BorderSide(color: theme.colorScheme.outlineVariant, width: 1),
+          top: BorderSide(color: tokens.line, width: 1),
         ),
+      ),
+    );
+  }
+}
+
+class _MetaAction extends StatelessWidget {
+  final IconData icon;
+  final String tooltip;
+  final Color color;
+  final VoidCallback onTap;
+
+  const _MetaAction({
+    required this.icon,
+    required this.tooltip,
+    required this.color,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      width: 28,
+      height: 28,
+      child: IconButton(
+        padding: EdgeInsets.zero,
+        iconSize: 15,
+        tooltip: tooltip,
+        icon: Icon(icon, color: color),
+        onPressed: onTap,
+      ),
+    );
+  }
+}
+
+class _FileChip extends StatelessWidget {
+  final String name;
+  final DiscoTokens tokens;
+  final Color textColor;
+  final Color accent;
+
+  const _FileChip({
+    required this.name,
+    required this.tokens,
+    required this.textColor,
+    required this.accent,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+      decoration: BoxDecoration(
+        border: Border.all(color: tokens.lineStrong),
+        borderRadius: BorderRadius.circular(9),
+        color: Colors.black.withValues(alpha: 0.12),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Container(
+            width: 26,
+            height: 26,
+            decoration: BoxDecoration(
+              color: Colors.white.withValues(alpha: 0.08),
+              borderRadius: BorderRadius.circular(6),
+            ),
+            child: Icon(Icons.description_outlined, size: 14, color: accent),
+          ),
+          const SizedBox(width: 8),
+          Flexible(
+            child: Text(
+              name,
+              style: TextStyle(color: textColor, fontSize: 12.5),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -347,67 +528,175 @@ class _ThinkingSectionState extends State<_ThinkingSection> {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final colors = theme.colorScheme;
+    final tokens = theme.extension<DiscoTokens>()!;
 
     return Container(
+      width: double.infinity,
+      clipBehavior: Clip.antiAlias,
       decoration: BoxDecoration(
-        color: colors.surfaceContainerHigh.withValues(alpha: 0.5),
-        borderRadius: BorderRadius.circular(10),
-        border: Border.all(
-          color: colors.outlineVariant.withValues(alpha: 0.4),
-        ),
+        color: colors.surfaceContainer,
+        borderRadius: BorderRadius.circular(11),
+        border: Border.all(color: tokens.line),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         mainAxisSize: MainAxisSize.min,
         children: [
           InkWell(
-            borderRadius: BorderRadius.circular(10),
             onTap: () => setState(() => _expanded = !_expanded),
             child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
               child: Row(
-                mainAxisSize: MainAxisSize.min,
                 children: [
-                  Icon(
-                    Icons.psychology_outlined,
-                    size: 16,
-                    color: colors.primary.withValues(alpha: 0.7),
+                  AnimatedRotation(
+                    turns: _expanded ? 0.25 : 0,
+                    duration: const Duration(milliseconds: 200),
+                    child: Icon(
+                      Icons.chevron_right_rounded,
+                      size: 16,
+                      color: tokens.textFaint,
+                    ),
                   ),
                   const SizedBox(width: 6),
                   Text(
                     'Thinking',
-                    style: TextStyle(
-                      color: colors.primary.withValues(alpha: 0.7),
-                      fontSize: 12,
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
-                  const SizedBox(width: 4),
-                  Icon(
-                    _expanded
-                        ? Icons.expand_less_rounded
-                        : Icons.expand_more_rounded,
-                    size: 16,
-                    color: colors.primary.withValues(alpha: 0.7),
+                    style:
+                        AppTheme.mono(fontSize: 12, color: tokens.textMuted),
                   ),
                 ],
               ),
             ),
           ),
           if (_expanded)
-            Padding(
-              padding: const EdgeInsets.fromLTRB(12, 0, 12, 10),
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.fromLTRB(12, 11, 12, 13),
+              decoration: BoxDecoration(
+                border: Border(top: BorderSide(color: tokens.line)),
+              ),
               child: SelectableText(
                 widget.thinking,
                 style: TextStyle(
-                  color: colors.onSurface.withValues(alpha: 0.6),
+                  color: tokens.textMuted,
                   fontSize: 13,
                   fontStyle: FontStyle.italic,
-                  height: 1.5,
+                  height: 1.6,
                 ),
               ),
             ),
         ],
+      ),
+    );
+  }
+}
+
+/// Renders streaming markdown at most every [_tick] instead of on every
+/// token, alternating a tail cursor so the response reads as live.
+class _StreamingMarkdown extends StatefulWidget {
+  final String content;
+  final MarkdownStyleSheet styleSheet;
+
+  const _StreamingMarkdown({
+    required this.content,
+    required this.styleSheet,
+  });
+
+  @override
+  State<_StreamingMarkdown> createState() => _StreamingMarkdownState();
+}
+
+class _StreamingMarkdownState extends State<_StreamingMarkdown> {
+  static const _tick = Duration(milliseconds: 250);
+  late String _rendered;
+  bool _cursorOn = true;
+  Timer? _timer;
+
+  @override
+  void initState() {
+    super.initState();
+    _rendered = widget.content;
+    _timer = Timer.periodic(_tick, (_) {
+      if (!mounted) return;
+      setState(() {
+        _rendered = widget.content;
+        _cursorOn = !_cursorOn;
+      });
+    });
+  }
+
+  @override
+  void dispose() {
+    _timer?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final data = _cursorOn ? '$_rendered ▍' : _rendered;
+    return MarkdownBody(
+      data: data,
+      selectable: false,
+      builders: {'pre': CodeBlockBuilder()},
+      styleSheet: widget.styleSheet,
+    );
+  }
+}
+
+class _TypingDots extends StatefulWidget {
+  const _TypingDots();
+
+  @override
+  State<_TypingDots> createState() => _TypingDotsState();
+}
+
+class _TypingDotsState extends State<_TypingDots>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _controller;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 1200),
+    )..repeat();
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final tokens = Theme.of(context).extension<DiscoTokens>()!;
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 4),
+      child: AnimatedBuilder(
+        animation: _controller,
+        builder: (context, _) {
+          return Row(
+            mainAxisSize: MainAxisSize.min,
+            children: List.generate(3, (i) {
+              final t = (_controller.value - i * 0.167) % 1.0;
+              final active = t >= 0 && t < 0.4;
+              final phase = active ? (1 - (t / 0.4 - 0.5).abs() * 2) : 0.0;
+              return Container(
+                width: 6,
+                height: 6,
+                margin: const EdgeInsets.only(right: 4),
+                transform:
+                    Matrix4.translationValues(0, -2.0 * phase, 0),
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: tokens.textFaint
+                      .withValues(alpha: 0.25 + 0.75 * phase),
+                ),
+              );
+            }),
+          );
+        },
       ),
     );
   }

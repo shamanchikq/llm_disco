@@ -5,6 +5,7 @@ import '../models/model_capabilities.dart';
 import '../models/ollama_search_result.dart';
 import '../providers/connection_provider.dart';
 import '../providers/model_provider.dart';
+import '../theme/app_theme.dart';
 
 class ModelManagementScreen extends StatefulWidget {
   const ModelManagementScreen({super.key});
@@ -21,12 +22,14 @@ class _ModelManagementScreenState extends State<ModelManagementScreen>
   List<OllamaSearchResult> _searchResults = [];
   bool _isSearching = false;
   String? _searchError;
-  String? _pullingDescription;
 
   // Expandable card state
   int? _expandedIndex;
-  List<ModelTag>? _expandedTags;
+  List<ModelTag>? _curatedTags;
+  List<ModelTag>? _allTags;
+  bool _showAllTags = false;
   bool _isLoadingTags = false;
+  bool _isLoadingAllTags = false;
   String? _tagsError;
 
   @override
@@ -61,7 +64,10 @@ class _ModelManagementScreenState extends State<ModelManagementScreen>
       _isSearching = true;
       _searchError = null;
       _expandedIndex = null;
-      _expandedTags = null;
+      _curatedTags = null;
+      _allTags = null;
+      _showAllTags = false;
+      _isLoadingAllTags = false;
       _tagsError = null;
     });
 
@@ -79,11 +85,18 @@ class _ModelManagementScreenState extends State<ModelManagementScreen>
     }
   }
 
-  void _startPull(String name, {String? description}) {
-    setState(() => _pullingDescription = description);
+  void _startPull(String name) {
     final service = context.read<ConnectionProvider>().service;
     if (service == null) return;
     context.read<ModelProvider>().pullModel(service, name);
+    _showPullSheet();
+  }
+
+  void _showPullSheet() {
+    showModalBottomSheet(
+      context: context,
+      builder: (ctx) => const _PullSheet(),
+    );
   }
 
   void _openModelPage(String modelName) {
@@ -99,8 +112,11 @@ class _ModelManagementScreenState extends State<ModelManagementScreen>
     if (_expandedIndex == index) {
       setState(() {
         _expandedIndex = null;
-        _expandedTags = null;
+        _curatedTags = null;
+        _allTags = null;
+        _showAllTags = false;
         _isLoadingTags = false;
+        _isLoadingAllTags = false;
         _tagsError = null;
       });
       return;
@@ -108,31 +124,83 @@ class _ModelManagementScreenState extends State<ModelManagementScreen>
 
     setState(() {
       _expandedIndex = index;
-      _expandedTags = null;
+      _curatedTags = null;
+      _allTags = null;
+      _showAllTags = false;
       _isLoadingTags = true;
+      _isLoadingAllTags = false;
       _tagsError = null;
     });
 
+    _loadCuratedTags(index);
+  }
+
+  Future<void> _loadCuratedTags(int index) async {
     final service = context.read<ConnectionProvider>().service;
     if (service == null) return;
+    final name = _searchResults[index].name;
 
-    service
-        .fetchModelTagsFromWeb(_searchResults[index].name)
-        .then((tags) {
+    try {
+      final curated = await service.fetchCuratedModelTags(name);
+      // If the overview page yields nothing (e.g. layout change), fall back
+      // to the full tag list.
+      List<ModelTag>? all;
+      if (curated.isEmpty) {
+        all = await service.fetchModelTagsFromWeb(name);
+      }
       if (mounted && _expandedIndex == index) {
         setState(() {
-          _expandedTags = tags;
+          _curatedTags = curated.isEmpty ? null : curated;
+          _allTags = all;
+          _showAllTags = curated.isEmpty;
           _isLoadingTags = false;
         });
       }
-    }).catchError((e) {
+    } catch (e) {
       if (mounted && _expandedIndex == index) {
         setState(() {
           _tagsError = e.toString();
           _isLoadingTags = false;
         });
       }
-    });
+    }
+  }
+
+  Future<void> _toggleShowAllTags() async {
+    if (_showAllTags) {
+      setState(() => _showAllTags = false);
+      return;
+    }
+    if (_allTags != null) {
+      setState(() => _showAllTags = true);
+      return;
+    }
+    final index = _expandedIndex;
+    if (index == null) return;
+    final service = context.read<ConnectionProvider>().service;
+    if (service == null) return;
+    final messenger = ScaffoldMessenger.of(context);
+
+    setState(() => _isLoadingAllTags = true);
+    try {
+      final all =
+          await service.fetchModelTagsFromWeb(_searchResults[index].name);
+      if (mounted && _expandedIndex == index) {
+        setState(() {
+          _allTags = all;
+          _showAllTags = true;
+          _isLoadingAllTags = false;
+        });
+      }
+    } catch (e) {
+      if (mounted && _expandedIndex == index) {
+        setState(() => _isLoadingAllTags = false);
+        messenger
+          ..clearSnackBars()
+          ..showSnackBar(
+              SnackBar(content: Text('Failed to load all versions: $e')));
+      }
+    }
   }
 
   Map<String, List<ModelTag>> _groupTags(List<ModelTag> tags) {
@@ -161,12 +229,6 @@ class _ModelManagementScreenState extends State<ModelManagementScreen>
     final value = double.tryParse(match.group(1)!) ?? 0;
     final unit = match.group(2)!.toUpperCase();
     return unit == 'B' ? value * 1e9 : value * 1e6;
-  }
-
-  void _cancelPull() {
-    final service = context.read<ConnectionProvider>().service;
-    if (service == null) return;
-    context.read<ModelProvider>().cancelPull(service);
   }
 
   Future<void> _deleteModel(String name) async {
@@ -212,23 +274,74 @@ class _ModelManagementScreenState extends State<ModelManagementScreen>
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final colors = theme.colorScheme;
+    final tokens = theme.extension<DiscoTokens>()!;
+    final modelCount = context.watch<ModelProvider>().models.length;
+    final baseUrl = context.watch<ConnectionProvider>().baseUrl;
+    final host = baseUrl.replaceFirst(RegExp(r'^https?://'), '');
 
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Manage Models'),
+        titleSpacing: 0,
+        title: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Text('Models'),
+            if (host.isNotEmpty) ...[
+              const SizedBox(height: 1),
+              Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Container(
+                    width: 6,
+                    height: 6,
+                    decoration: BoxDecoration(
+                      color: tokens.good,
+                      shape: BoxShape.circle,
+                    ),
+                  ),
+                  const SizedBox(width: 6),
+                  Text(
+                    host,
+                    style: AppTheme.mono(
+                      fontSize: 11,
+                      color: tokens.textMuted,
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          ],
+        ),
         bottom: TabBar(
           controller: _tabController,
-          tabs: const [
-            Tab(text: 'Installed'),
-            Tab(text: 'Browse'),
+          labelStyle: const TextStyle(fontSize: 13.5),
+          tabs: [
+            Tab(
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Text('Installed'),
+                  const SizedBox(width: 5),
+                  Text(
+                    '$modelCount',
+                    style: AppTheme.mono(
+                      fontSize: 10.5,
+                      color: tokens.textFaint,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const Tab(text: 'Discover'),
           ],
         ),
       ),
       body: TabBarView(
         controller: _tabController,
         children: [
-          _buildInstalledTab(theme, colors),
-          _buildBrowseTab(theme, colors),
+          _buildInstalledTab(theme, colors, tokens, host),
+          _buildDiscoverTab(theme, colors, tokens),
         ],
       ),
     );
@@ -244,7 +357,12 @@ class _ModelManagementScreenState extends State<ModelManagementScreen>
     }
   }
 
-  Widget _buildInstalledTab(ThemeData theme, ColorScheme colors) {
+  Widget _buildInstalledTab(
+    ThemeData theme,
+    ColorScheme colors,
+    DiscoTokens tokens,
+    String host,
+  ) {
     final modelProvider = context.watch<ModelProvider>();
     final models = modelProvider.models;
 
@@ -258,7 +376,7 @@ class _ModelManagementScreenState extends State<ModelManagementScreen>
                 child: Text(
                   'No models installed',
                   style: theme.textTheme.bodyLarge?.copyWith(
-                    color: colors.onSurface.withValues(alpha: 0.6),
+                    color: tokens.textMuted,
                   ),
                 ),
               ),
@@ -271,46 +389,68 @@ class _ModelManagementScreenState extends State<ModelManagementScreen>
     return RefreshIndicator(
       onRefresh: _refreshInstalledModels,
       child: ListView.builder(
-        padding: const EdgeInsets.symmetric(vertical: 8),
-        itemCount: models.length,
+        itemCount: models.length + 1,
         itemBuilder: (context, index) {
+          if (index == models.length) {
+            return Padding(
+              padding: const EdgeInsets.all(16),
+              child: Text(
+                host.isEmpty
+                    ? '${models.length} models'
+                    : '${models.length} models on $host',
+                textAlign: TextAlign.center,
+                style:
+                    AppTheme.mono(fontSize: 11, color: tokens.textFaint),
+              ),
+            );
+          }
           final name = models[index];
           final caps = modelProvider.getCapabilities(name);
-          final chips = _buildCapabilityChips(caps, theme, colors);
-          return ListTile(
+          return InkWell(
             onTap: () => _openModelPage(name),
-            title: Row(
-              children: [
-                Expanded(child: Text(name)),
-                Icon(
-                  Icons.open_in_new,
-                  size: 16,
-                  color: colors.onSurface.withValues(alpha: 0.4),
-                ),
-              ],
-            ),
-            subtitle: caps == null
-                ? const Padding(
-                    padding: EdgeInsets.only(top: 4),
-                    child: SizedBox(
-                      height: 12,
-                      width: 12,
-                      child: CircularProgressIndicator(strokeWidth: 1.5),
-                    ),
-                  )
-                : chips.isEmpty
-                    ? null
-                    : Padding(
-                        padding: const EdgeInsets.only(top: 4),
-                        child: Wrap(
-                          spacing: 4,
-                          runSpacing: 4,
-                          children: chips,
+            child: Container(
+              padding: const EdgeInsets.symmetric(
+                  horizontal: 15, vertical: 15),
+              decoration: BoxDecoration(
+                border: Border(bottom: BorderSide(color: tokens.line)),
+              ),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          name,
+                          style: AppTheme.mono(
+                            fontSize: 14,
+                            color: colors.onSurface,
+                          ),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
                         ),
-                      ),
-            trailing: IconButton(
-              icon: Icon(Icons.delete_outline, color: colors.error),
-              onPressed: () => _deleteModel(name),
+                        const SizedBox(height: 5),
+                        caps == null
+                            ? SizedBox(
+                                height: 12,
+                                width: 12,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 1.5,
+                                  color: tokens.textFaint,
+                                ),
+                              )
+                            : _CapabilityIcons(caps: caps),
+                      ],
+                    ),
+                  ),
+                  IconButton(
+                    icon: Icon(Icons.delete_outline_rounded,
+                        size: 18, color: tokens.textFaint),
+                    tooltip: 'Delete',
+                    onPressed: () => _deleteModel(name),
+                  ),
+                ],
+              ),
             ),
           );
         },
@@ -318,120 +458,58 @@ class _ModelManagementScreenState extends State<ModelManagementScreen>
     );
   }
 
-  List<Widget> _buildCapabilityChips(
-      ModelCapabilities? caps, ThemeData theme, ColorScheme colors) {
-    if (caps == null) return [];
-    final labels = <String>[
-      if (caps.supportsVision) 'Vision',
-      if (caps.supportsTools) 'Tools',
-      if (caps.supportsThinking) 'Thinking',
-      if (caps.supportsFiles) 'Files',
-    ];
-    return labels
-        .map((label) => Container(
-              padding:
-                  const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-              decoration: BoxDecoration(
-                color: colors.surfaceContainerHigh,
-                borderRadius: BorderRadius.circular(4),
-              ),
-              child: Text(
-                label,
-                style: theme.textTheme.bodySmall?.copyWith(fontSize: 11),
-              ),
-            ))
-        .toList();
-  }
-
-  Widget _buildBrowseTab(ThemeData theme, ColorScheme colors) {
+  Widget _buildDiscoverTab(
+    ThemeData theme,
+    ColorScheme colors,
+    DiscoTokens tokens,
+  ) {
     final modelProvider = context.watch<ModelProvider>();
-    final installedSet =
-        modelProvider.models.map((m) => m.split(':').first).toSet();
 
     return Column(
       children: [
-        // Pull progress banner
+        // Pull progress banner (visible when sheet is dismissed)
         if (modelProvider.isPulling)
-          Container(
-            margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-            padding: const EdgeInsets.all(12),
-            decoration: BoxDecoration(
-              color: colors.surfaceContainerHigh,
-              borderRadius: BorderRadius.circular(12),
-            ),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
-                  children: [
-                    Icon(Icons.download_rounded,
-                        size: 16, color: colors.primary),
-                    const SizedBox(width: 6),
-                    Expanded(
-                      child: Text(
-                        modelProvider.pullingModelName ?? 'Downloading...',
-                        style: theme.textTheme.titleSmall
-                            ?.copyWith(fontWeight: FontWeight.bold),
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                    ),
-                    if (modelProvider.pullProgress != null)
-                      Text(
-                        '${(modelProvider.pullProgress! * 100).toStringAsFixed(1)}%',
-                        style: theme.textTheme.bodySmall?.copyWith(
-                          color: colors.primary,
-                          fontWeight: FontWeight.bold,
-                        ),
-                      ),
-                    const SizedBox(width: 8),
-                    SizedBox(
-                      height: 28,
-                      child: TextButton(
-                        onPressed: _cancelPull,
-                        child: const Text('Cancel'),
-                      ),
-                    ),
-                  ],
-                ),
-                if (_pullingDescription != null &&
-                    _pullingDescription!.isNotEmpty)
-                  Padding(
-                    padding: const EdgeInsets.only(top: 4),
+          InkWell(
+            onTap: _showPullSheet,
+            child: Container(
+              padding: const EdgeInsets.symmetric(
+                  horizontal: 14, vertical: 10),
+              decoration: BoxDecoration(
+                border: Border(bottom: BorderSide(color: tokens.line)),
+                color: colors.surfaceContainer,
+              ),
+              child: Row(
+                children: [
+                  Icon(Icons.download_rounded,
+                      size: 15, color: colors.primary),
+                  const SizedBox(width: 8),
+                  Expanded(
                     child: Text(
-                      _pullingDescription!,
-                      style: theme.textTheme.bodySmall?.copyWith(
-                        color: colors.onSurface.withValues(alpha: 0.6),
-                      ),
-                      maxLines: 2,
+                      'Pulling ${modelProvider.pullingModelName ?? '…'}',
+                      style: AppTheme.mono(
+                          fontSize: 12, color: colors.onSurface),
                       overflow: TextOverflow.ellipsis,
                     ),
                   ),
-                const SizedBox(height: 8),
-                LinearProgressIndicator(
-                  value: modelProvider.pullProgress,
-                  borderRadius: BorderRadius.circular(4),
-                ),
-                Padding(
-                  padding: const EdgeInsets.only(top: 4),
-                  child: Text(
-                    modelProvider.pullStatus,
-                    style: theme.textTheme.bodySmall?.copyWith(
-                      color: colors.onSurface.withValues(alpha: 0.6),
-                    ),
-                    overflow: TextOverflow.ellipsis,
+                  Text(
+                    modelProvider.pullProgress != null
+                        ? '${(modelProvider.pullProgress! * 100).toStringAsFixed(0)}%'
+                        : '…',
+                    style: AppTheme.mono(
+                        fontSize: 11, color: tokens.textMuted),
                   ),
-                ),
-              ],
+                ],
+              ),
             ),
           ),
         if (modelProvider.pullError != null)
           Container(
             width: double.infinity,
             padding: const EdgeInsets.all(12),
-            color: colors.errorContainer,
+            color: colors.error.withValues(alpha: 0.12),
             child: Text(
               modelProvider.pullError!,
-              style: TextStyle(color: colors.onErrorContainer),
+              style: TextStyle(color: colors.error, fontSize: 13),
             ),
           ),
         if (!modelProvider.isPulling &&
@@ -440,76 +518,111 @@ class _ModelManagementScreenState extends State<ModelManagementScreen>
           Container(
             width: double.infinity,
             padding: const EdgeInsets.all(12),
-            color: colors.primaryContainer,
+            color: tokens.good.withValues(alpha: 0.1),
             child: Row(
               children: [
                 Icon(Icons.check_circle_outline,
-                    size: 18, color: colors.onPrimaryContainer),
+                    size: 16, color: tokens.good),
                 const SizedBox(width: 8),
                 Text(
-                  'Model pulled successfully!',
-                  style: TextStyle(color: colors.onPrimaryContainer),
+                  'Model installed',
+                  style: TextStyle(color: tokens.good, fontSize: 13),
                 ),
               ],
             ),
           ),
-        // Search field
-        Padding(
-          padding: const EdgeInsets.all(12),
-          child: TextField(
-            controller: _searchController,
-            decoration: InputDecoration(
-              hintText: 'Search ollama.com...',
-              filled: true,
-              fillColor: colors.surfaceContainer,
-              border: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(12),
-                borderSide: BorderSide.none,
-              ),
-              suffixIcon: IconButton(
-                icon: const Icon(Icons.search),
-                onPressed: _search,
-              ),
-            ),
-            onSubmitted: (_) => _search(),
+        // Search + manual pull
+        Container(
+          padding: const EdgeInsets.fromLTRB(14, 13, 14, 13),
+          decoration: BoxDecoration(
+            border: Border(bottom: BorderSide(color: tokens.line)),
           ),
-        ),
-        // Manual pull row
-        Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 12),
-          child: Row(
+          child: Column(
             children: [
-              Expanded(
-                child: TextField(
-                  controller: _pullController,
-                  enabled: !modelProvider.isPulling,
-                  decoration: InputDecoration(
-                    hintText: 'Model name (e.g. llama3)',
-                    filled: true,
-                    fillColor: colors.surfaceContainer,
-                    border: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(12),
-                      borderSide: BorderSide.none,
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 13),
+                decoration: BoxDecoration(
+                  color: colors.surfaceContainer,
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(color: tokens.line),
+                ),
+                child: Row(
+                  children: [
+                    Icon(Icons.search, size: 17, color: tokens.textFaint),
+                    const SizedBox(width: 9),
+                    Expanded(
+                      child: TextField(
+                        controller: _searchController,
+                        style: const TextStyle(fontSize: 14),
+                        decoration: InputDecoration(
+                          hintText: 'Search ollama.com…',
+                          hintStyle: TextStyle(color: tokens.textFaint),
+                          filled: false,
+                          border: InputBorder.none,
+                          enabledBorder: InputBorder.none,
+                          focusedBorder: InputBorder.none,
+                          isDense: true,
+                          contentPadding:
+                              const EdgeInsets.symmetric(vertical: 12),
+                        ),
+                        textInputAction: TextInputAction.search,
+                        onSubmitted: (_) => _search(),
+                      ),
                     ),
-                    contentPadding: const EdgeInsets.symmetric(
-                        horizontal: 12, vertical: 10),
-                  ),
+                  ],
                 ),
               ),
-              const SizedBox(width: 8),
-              FilledButton(
-                onPressed: modelProvider.isPulling
-                    ? null
-                    : () {
-                        final name = _pullController.text.trim();
-                        if (name.isNotEmpty) _startPull(name);
-                      },
-                child: const Text('Pull'),
+              const SizedBox(height: 9),
+              Row(
+                children: [
+                  Expanded(
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 13),
+                      decoration: BoxDecoration(
+                        color: colors.surfaceContainer,
+                        borderRadius: BorderRadius.circular(12),
+                        border: Border.all(color: tokens.line),
+                      ),
+                      child: TextField(
+                        controller: _pullController,
+                        enabled: !modelProvider.isPulling,
+                        style: const TextStyle(fontSize: 14),
+                        decoration: InputDecoration(
+                          hintText: 'Model name (e.g. llama3)',
+                          hintStyle: TextStyle(color: tokens.textFaint),
+                          filled: false,
+                          border: InputBorder.none,
+                          enabledBorder: InputBorder.none,
+                          focusedBorder: InputBorder.none,
+                          isDense: true,
+                          contentPadding:
+                              const EdgeInsets.symmetric(vertical: 12),
+                        ),
+                        onSubmitted: (_) {
+                          final name = _pullController.text.trim();
+                          if (name.isNotEmpty &&
+                              !modelProvider.isPulling) {
+                            _startPull(name);
+                          }
+                        },
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  FilledButton(
+                    onPressed: modelProvider.isPulling
+                        ? null
+                        : () {
+                            final name = _pullController.text.trim();
+                            if (name.isNotEmpty) _startPull(name);
+                          },
+                    child: const Text('Pull'),
+                  ),
+                ],
               ),
             ],
           ),
         ),
-        const SizedBox(height: 8),
         // Search results
         Expanded(
           child: _isSearching
@@ -530,26 +643,21 @@ class _ModelManagementScreenState extends State<ModelManagementScreen>
                           child: Text(
                             'Search for models on ollama.com',
                             style: theme.textTheme.bodyMedium?.copyWith(
-                              color:
-                                  colors.onSurface.withValues(alpha: 0.5),
+                              color: tokens.textFaint,
                             ),
                           ),
                         )
                       : ListView.builder(
-                          padding:
-                              const EdgeInsets.symmetric(horizontal: 12),
                           itemCount: _searchResults.length,
                           itemBuilder: (context, index) {
                             final result = _searchResults[index];
-                            final isInstalled =
-                                installedSet.contains(result.name);
-                            return _buildSearchResultCard(
+                            return _buildDiscoverCard(
                               result,
                               index,
-                              isInstalled,
                               modelProvider.isPulling,
                               theme,
                               colors,
+                              tokens,
                             );
                           },
                         ),
@@ -558,106 +666,109 @@ class _ModelManagementScreenState extends State<ModelManagementScreen>
     );
   }
 
-  Widget _buildSearchResultCard(
+  Widget _buildDiscoverCard(
     OllamaSearchResult result,
     int index,
-    bool isInstalled,
     bool isPulling,
     ThemeData theme,
     ColorScheme colors,
+    DiscoTokens tokens,
   ) {
     final isExpanded = _expandedIndex == index;
 
-    return Card(
-      margin: const EdgeInsets.only(bottom: 8),
-      clipBehavior: Clip.antiAlias,
+    return Container(
+      padding: const EdgeInsets.all(15),
+      decoration: BoxDecoration(
+        border: Border(bottom: BorderSide(color: tokens.line)),
+      ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          InkWell(
-            onTap: () => _toggleExpanded(index),
-            child: Padding(
-              padding: const EdgeInsets.all(12),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Row(
-                    children: [
-                      Expanded(
-                        child: Text(
-                          result.name,
-                          style: theme.textTheme.titleSmall?.copyWith(
-                            fontWeight: FontWeight.w600,
-                          ),
-                        ),
-                      ),
-                      if (result.pullCount != null)
-                        Padding(
-                          padding: const EdgeInsets.only(right: 4),
-                          child: Text(
-                            '${result.pullCount} Pulls',
-                            style: theme.textTheme.bodySmall?.copyWith(
-                              color: colors.onSurface.withValues(alpha: 0.5),
-                            ),
-                          ),
-                        ),
-                      IconButton(
-                        icon: const Icon(Icons.open_in_new, size: 18),
-                        tooltip: 'View on ollama.com',
-                        padding: EdgeInsets.zero,
-                        constraints: const BoxConstraints(),
-                        onPressed: () => _openModelPage(result.name),
-                      ),
-                      const SizedBox(width: 4),
-                      Icon(
-                        isExpanded
-                            ? Icons.expand_less
-                            : Icons.expand_more,
-                        size: 20,
-                        color: colors.onSurface.withValues(alpha: 0.5),
-                      ),
-                    ],
-                  ),
-                  if (result.description != null &&
-                      result.description!.isNotEmpty) ...[
-                    const SizedBox(height: 4),
-                    Text(
-                      result.description!,
-                      style: theme.textTheme.bodySmall,
-                      maxLines: isExpanded ? 10 : 2,
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                  ],
-                  if (!isExpanded && result.tags.isNotEmpty) ...[
-                    const SizedBox(height: 6),
-                    Wrap(
-                      spacing: 4,
-                      runSpacing: 4,
-                      children: result.tags
-                          .take(5)
-                          .map((tag) => Container(
-                                padding: const EdgeInsets.symmetric(
-                                    horizontal: 6, vertical: 2),
-                                decoration: BoxDecoration(
-                                  color: colors.surfaceContainerHigh,
-                                  borderRadius: BorderRadius.circular(4),
-                                ),
-                                child: Text(
-                                  tag,
-                                  style: theme.textTheme.bodySmall
-                                      ?.copyWith(fontSize: 11),
-                                ),
-                              ))
-                          .toList(),
-                    ),
-                  ],
-                ],
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Expanded(
+                child: Text(
+                  result.name,
+                  style: AppTheme.mono(
+                      fontSize: 14.5, color: colors.onSurface),
+                ),
               ),
+              GestureDetector(
+                onTap: () => _openModelPage(result.name),
+                child: Icon(Icons.open_in_new,
+                    size: 15, color: tokens.textFaint),
+              ),
+            ],
+          ),
+          if (result.description != null &&
+              result.description!.isNotEmpty) ...[
+            const SizedBox(height: 5),
+            Text(
+              result.description!,
+              style: TextStyle(
+                fontSize: 13,
+                height: 1.5,
+                color: tokens.textMuted,
+              ),
+              maxLines: isExpanded ? 10 : 3,
+              overflow: TextOverflow.ellipsis,
+            ),
+          ],
+          if (result.pullCount != null) ...[
+            const SizedBox(height: 9),
+            Text(
+              '${result.pullCount} pulls',
+              style: AppTheme.mono(fontSize: 10.5, color: tokens.textFaint),
+            ),
+          ],
+          if (!isExpanded && result.tags.isNotEmpty) ...[
+            const SizedBox(height: 11),
+            Wrap(
+              spacing: 6,
+              runSpacing: 6,
+              children: result.tags
+                  .take(5)
+                  .map((tag) => Container(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 10, vertical: 5),
+                        decoration: BoxDecoration(
+                          border: Border.all(color: tokens.line),
+                          borderRadius: BorderRadius.circular(999),
+                        ),
+                        child: Text(
+                          tag,
+                          style: AppTheme.mono(
+                              fontSize: 11, color: tokens.textMuted),
+                        ),
+                      ))
+                  .toList(),
+            ),
+          ],
+          const SizedBox(height: 10),
+          GestureDetector(
+            onTap: () => _toggleExpanded(index),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(
+                  isExpanded
+                      ? Icons.keyboard_arrow_down_rounded
+                      : Icons.chevron_right_rounded,
+                  size: 15,
+                  color: colors.primary,
+                ),
+                const SizedBox(width: 6),
+                Text(
+                  isExpanded ? 'Hide' : 'Versions',
+                  style: AppTheme.mono(
+                      fontSize: 12.5, color: colors.primary),
+                ),
+              ],
             ),
           ),
-          // Expanded tag section
           if (isExpanded)
-            _buildExpandedTags(result, isPulling, theme, colors),
+            _buildExpandedTags(result, isPulling, theme, colors, tokens),
         ],
       ),
     );
@@ -668,6 +779,7 @@ class _ModelManagementScreenState extends State<ModelManagementScreen>
     bool isPulling,
     ThemeData theme,
     ColorScheme colors,
+    DiscoTokens tokens,
   ) {
     if (_isLoadingTags) {
       return const Padding(
@@ -678,71 +790,343 @@ class _ModelManagementScreenState extends State<ModelManagementScreen>
 
     if (_tagsError != null) {
       return Padding(
-        padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
+        padding: const EdgeInsets.only(top: 8),
         child: Text(
           'Failed to load tags: $_tagsError',
-          style: TextStyle(color: colors.error),
+          style: TextStyle(color: colors.error, fontSize: 13),
         ),
       );
     }
 
-    if (_expandedTags == null || _expandedTags!.isEmpty) {
+    final displayed = _showAllTags ? _allTags : _curatedTags;
+
+    if (displayed == null || displayed.isEmpty) {
       return Padding(
-        padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
+        padding: const EdgeInsets.only(top: 8),
         child: Text(
           'No tags found',
           style: theme.textTheme.bodyMedium?.copyWith(
-            color: colors.onSurface.withValues(alpha: 0.5),
+            color: tokens.textFaint,
           ),
         ),
       );
     }
 
-    final grouped = _groupTags(_expandedTags!);
+    Widget pill(ModelTag tag) => _VersionPill(
+          name: tag.name,
+          size: tag.size,
+          enabled: !isPulling,
+          onTap: () => _startPull('${result.name}:${tag.name}'),
+        );
 
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          const Divider(height: 1),
-          for (final entry in grouped.entries) ...[
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        if (!_showAllTags) ...[
+          const SizedBox(height: 12),
+          Wrap(
+            spacing: 6,
+            runSpacing: 6,
+            children: displayed.map(pill).toList(),
+          ),
+        ] else
+          for (final entry in _groupTags(displayed).entries) ...[
             Padding(
-              padding: const EdgeInsets.only(top: 10, bottom: 6),
+              padding: const EdgeInsets.only(top: 12, bottom: 7),
               child: Text(
-                entry.key,
-                style: theme.textTheme.titleSmall?.copyWith(
-                  fontWeight: FontWeight.bold,
-                  color: colors.primary,
+                entry.key.toUpperCase(),
+                style: AppTheme.mono(
+                  fontSize: 10,
+                  letterSpacing: 0.6,
+                  color: tokens.textFaint,
                 ),
               ),
             ),
             Wrap(
-              spacing: 8,
-              runSpacing: 8,
-              children: entry.value.map((tag) {
-                final label = tag.size != null
-                    ? '${tag.name}  (${tag.size})'
-                    : tag.name;
-                return FilledButton.tonal(
-                  onPressed: isPulling
-                      ? null
-                      : () => _startPull(
-                            '${result.name}:${tag.name}',
-                            description: result.description,
-                          ),
-                  style: FilledButton.styleFrom(
-                    padding: const EdgeInsets.symmetric(
-                        horizontal: 12, vertical: 8),
-                  ),
-                  child: Text(label, style: const TextStyle(fontSize: 13)),
-                );
-              }).toList(),
+              spacing: 6,
+              runSpacing: 6,
+              children: entry.value.map(pill).toList(),
             ),
           ],
-        ],
+        // Toggle between the curated list and every quantization variant.
+        // Hidden when the curated fetch came up empty (nothing to go back to).
+        if (_curatedTags != null)
+          Padding(
+            padding: const EdgeInsets.only(top: 12),
+            child: GestureDetector(
+              onTap: _isLoadingAllTags ? null : _toggleShowAllTags,
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  if (_isLoadingAllTags)
+                    SizedBox(
+                      width: 12,
+                      height: 12,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 1.5,
+                        color: colors.primary,
+                      ),
+                    )
+                  else
+                    Icon(
+                      _showAllTags
+                          ? Icons.unfold_less_rounded
+                          : Icons.unfold_more_rounded,
+                      size: 14,
+                      color: colors.primary,
+                    ),
+                  const SizedBox(width: 6),
+                  Text(
+                    _showAllTags
+                        ? 'Show fewer'
+                        : 'All versions (incl. quantizations)',
+                    style:
+                        AppTheme.mono(fontSize: 12.5, color: colors.primary),
+                  ),
+                ],
+              ),
+            ),
+          ),
+      ],
+    );
+  }
+}
+
+class _CapabilityIcons extends StatelessWidget {
+  final ModelCapabilities caps;
+
+  const _CapabilityIcons({required this.caps});
+
+  static const _order = [
+    ('vision', Icons.remove_red_eye_outlined, 'Vision'),
+    ('thinking', Icons.psychology_outlined, 'Thinking'),
+    ('tools', Icons.build_outlined, 'Tools'),
+    ('audio', Icons.graphic_eq_rounded, 'Audio'),
+  ];
+
+  bool _has(String key) {
+    switch (key) {
+      case 'vision':
+        return caps.supportsVision;
+      case 'thinking':
+        return caps.supportsThinking;
+      case 'tools':
+        return caps.supportsTools;
+      case 'audio':
+        return caps.supportsAudio;
+    }
+    return false;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final colors = theme.colorScheme;
+    final tokens = theme.extension<DiscoTokens>()!;
+    final on = _order.where((e) => _has(e.$1)).toList();
+
+    if (on.isEmpty) {
+      return Text(
+        'no chat capabilities',
+        style: AppTheme.mono(fontSize: 11, color: tokens.textFaint),
+      );
+    }
+
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: on.map((e) {
+        return Container(
+          width: 25,
+          height: 25,
+          margin: const EdgeInsets.only(right: 5),
+          decoration: BoxDecoration(
+            color: colors.surfaceContainer,
+            borderRadius: BorderRadius.circular(7),
+            border: Border.all(
+              color: Color.lerp(tokens.line, colors.primary, 0.4)!,
+            ),
+          ),
+          child: Tooltip(
+            message: e.$3,
+            child: Icon(e.$2, size: 14, color: colors.primary),
+          ),
+        );
+      }).toList(),
+    );
+  }
+}
+
+class _VersionPill extends StatelessWidget {
+  final String name;
+  final String? size;
+  final bool enabled;
+  final VoidCallback onTap;
+
+  const _VersionPill({
+    required this.name,
+    required this.size,
+    required this.enabled,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final colors = theme.colorScheme;
+    final tokens = theme.extension<DiscoTokens>()!;
+    final fg = enabled ? tokens.textMuted : tokens.textFaint;
+
+    return GestureDetector(
+      onTap: enabled ? onTap : null,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+        decoration: BoxDecoration(
+          border: Border.all(color: tokens.line),
+          borderRadius: BorderRadius.circular(999),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.download_rounded,
+                size: 12, color: enabled ? colors.primary : fg),
+            const SizedBox(width: 7),
+            Text(name, style: AppTheme.mono(fontSize: 11, color: fg)),
+            if (size != null) ...[
+              const SizedBox(width: 7),
+              Text(
+                size!,
+                style: AppTheme.mono(fontSize: 11, color: tokens.textFaint),
+              ),
+            ],
+          ],
+        ),
       ),
     );
   }
 }
 
+/// Bottom-sheet pull progress, per the redesign mockup. Binds to
+/// [ModelProvider]; dismissing it keeps the pull running (the banner in the
+/// Discover tab reopens it).
+class _PullSheet extends StatelessWidget {
+  const _PullSheet();
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final colors = theme.colorScheme;
+    final tokens = theme.extension<DiscoTokens>()!;
+
+    return Consumer<ModelProvider>(
+      builder: (context, modelProvider, _) {
+        final pulling = modelProvider.isPulling;
+        final progress = modelProvider.pullProgress;
+        final pct = progress != null
+            ? '${(progress * 100).toStringAsFixed(0)}%'
+            : '…';
+        final failed = modelProvider.pullError != null;
+
+        return SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(18, 8, 18, 20),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Center(
+                  child: Container(
+                    width: 36,
+                    height: 4,
+                    decoration: BoxDecoration(
+                      color: tokens.lineStrong,
+                      borderRadius: BorderRadius.circular(2),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 16),
+                Text(
+                  pulling
+                      ? 'Pulling ${modelProvider.pullingModelName ?? ''}'
+                      : failed
+                          ? 'Pull failed'
+                          : 'Pull complete',
+                  style: AppTheme.mono(fontSize: 13, color: colors.onSurface),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  failed
+                      ? modelProvider.pullError!
+                      : modelProvider.pullStatus,
+                  style: AppTheme.mono(
+                    fontSize: 11,
+                    color: failed ? colors.error : tokens.textFaint,
+                  ),
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                ),
+                const SizedBox(height: 16),
+                ClipRRect(
+                  borderRadius: BorderRadius.circular(999),
+                  child: LinearProgressIndicator(
+                    value: pulling ? progress : (failed ? 0 : 1),
+                    minHeight: 8,
+                    backgroundColor: colors.surface,
+                  ),
+                ),
+                const SizedBox(height: 9),
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    Text(
+                      pulling ? 'downloading' : (failed ? 'error' : 'done'),
+                      style: AppTheme.mono(
+                          fontSize: 11, color: tokens.textMuted),
+                    ),
+                    Text(
+                      pulling ? pct : (failed ? '—' : '100%'),
+                      style: AppTheme.mono(
+                          fontSize: 11, color: tokens.textMuted),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 16),
+                Material(
+                  color: colors.surfaceContainerHigh,
+                  borderRadius: BorderRadius.circular(12),
+                  child: InkWell(
+                    borderRadius: BorderRadius.circular(12),
+                    onTap: () {
+                      if (pulling) {
+                        final service =
+                            context.read<ConnectionProvider>().service;
+                        if (service != null) {
+                          context
+                              .read<ModelProvider>()
+                              .cancelPull(service);
+                        }
+                      }
+                      Navigator.pop(context);
+                    },
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(vertical: 13),
+                      decoration: BoxDecoration(
+                        border: Border.all(color: tokens.line),
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      child: Text(
+                        pulling ? 'Cancel download' : 'Done',
+                        textAlign: TextAlign.center,
+                        style: TextStyle(
+                            fontSize: 14, color: colors.onSurface),
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+}

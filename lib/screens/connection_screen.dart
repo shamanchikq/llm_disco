@@ -7,7 +7,12 @@ import '../services/storage_service.dart';
 import 'main_screen.dart';
 
 class ConnectionScreen extends StatefulWidget {
-  const ConnectionScreen({super.key});
+  const ConnectionScreen({super.key, this.autoConnect = true});
+
+  /// Attempt the saved connection automatically on first load. The sidebar's
+  /// "Connection settings" passes false so an intentional disconnect doesn't
+  /// bounce straight back.
+  final bool autoConnect;
 
   @override
   State<ConnectionScreen> createState() => _ConnectionScreenState();
@@ -17,6 +22,7 @@ class _ConnectionScreenState extends State<ConnectionScreen> {
   final ipController = TextEditingController();
   final portController = TextEditingController(text: "11434");
   final searxngController = TextEditingController();
+  final authController = TextEditingController();
   bool useHttp = true;
   bool _settingsLoaded = false;
   List<Map<String, dynamic>> _savedConnections = [];
@@ -46,8 +52,15 @@ class _ConnectionScreenState extends State<ConnectionScreen> {
         portController.text = settings['port'] as String? ?? '11434';
         useHttp = settings['useHttp'] as bool? ?? true;
         searxngController.text = settings['searxngUrl'] as String? ?? '';
+        authController.text = settings['authToken'] as String? ?? '';
       }
     });
+
+    // Resume the last session without a manual tap; falls back to the form
+    // (with the error shown) when the server isn't reachable.
+    if (widget.autoConnect && ipController.text.trim().isNotEmpty) {
+      await _connect(context);
+    }
   }
 
   void _fillFromProfile(Map<String, dynamic> profile) {
@@ -56,6 +69,7 @@ class _ConnectionScreenState extends State<ConnectionScreen> {
       portController.text = profile['port'] as String? ?? '11434';
       useHttp = profile['useHttp'] as bool? ?? true;
       searxngController.text = profile['searxngUrl'] as String? ?? '';
+      authController.text = profile['authToken'] as String? ?? '';
     });
   }
 
@@ -122,12 +136,14 @@ class _ConnectionScreenState extends State<ConnectionScreen> {
 
     final storage = context.read<StorageService>();
     final searxng = searxngController.text.trim();
+    final auth = authController.text.trim();
     final profile = <String, dynamic>{
       'name': name,
       'ip': ip,
       'port': portController.text.trim(),
       'useHttp': useHttp,
       if (searxng.isNotEmpty) 'searxngUrl': searxng,
+      if (auth.isNotEmpty) 'authToken': auth,
     };
     setState(() => _savedConnections.add(profile));
     await storage.saveSavedConnections(_savedConnections);
@@ -151,7 +167,7 @@ class _ConnectionScreenState extends State<ConnectionScreen> {
                   child: ListView.separated(
                     scrollDirection: Axis.horizontal,
                     itemCount: _savedConnections.length,
-                    separatorBuilder: (_, __) => const SizedBox(width: 8),
+                    separatorBuilder: (_, _) => const SizedBox(width: 8),
                     itemBuilder: (_, i) {
                       final profile = _savedConnections[i];
                       return GestureDetector(
@@ -214,6 +230,16 @@ class _ConnectionScreenState extends State<ConnectionScreen> {
                           labelText: "SearXNG URL (optional)",
                           hintText: "http://192.168.1.x:8080",
                           prefixIcon: Icon(Icons.travel_explore),
+                        ),
+                      ),
+                      const SizedBox(height: 16),
+                      TextField(
+                        controller: authController,
+                        obscureText: true,
+                        decoration: const InputDecoration(
+                          labelText: "API key / Bearer token (optional)",
+                          hintText: "For Ollama behind an auth proxy",
+                          prefixIcon: Icon(Icons.key_outlined),
                         ),
                       ),
                       if (connectionProvider.error != null) ...[
@@ -279,15 +305,18 @@ class _ConnectionScreenState extends State<ConnectionScreen> {
       ip: ip,
       port: port,
       useHttp: useHttp,
+      authToken: authController.text.trim(),
     );
 
     if (success && mounted) {
       final searxng = searxngController.text.trim();
+      final auth = authController.text.trim();
       await storage.saveConnectionSettings(
         ip: ip,
         port: port,
         useHttp: useHttp,
         searxngUrl: searxng.isNotEmpty ? searxng : null,
+        authToken: auth.isNotEmpty ? auth : null,
       );
       chatProvider.setService(connectionProvider.service!);
       chatProvider.setSearxngUrl(searxng.isNotEmpty ? searxng : null);

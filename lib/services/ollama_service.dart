@@ -10,6 +10,7 @@ class ChatStreamEvent {
   final bool done;
   final int? evalCount;
   final int? evalDuration;
+  final int? promptEvalCount;
 
   const ChatStreamEvent({
     this.contentToken,
@@ -18,6 +19,7 @@ class ChatStreamEvent {
     this.done = false,
     this.evalCount,
     this.evalDuration,
+    this.promptEvalCount,
   });
 }
 
@@ -42,16 +44,28 @@ class PullProgressEvent {
 
 class OllamaService {
   final String baseUrl;
+
+  /// Full Authorization header value (e.g. "Bearer xyz") sent to every
+  /// Ollama endpoint. Never applied to external requests (ollama.com,
+  /// SearXNG).
+  final String? authHeader;
   http.Client? _activeClient;
   http.Client? _pullClient;
 
-  OllamaService(this.baseUrl);
+  OllamaService(this.baseUrl, {this.authHeader});
+
+  Map<String, String> get _jsonHeaders => {
+        'Content-Type': 'application/json',
+        'Authorization': ?authHeader,
+      };
 
   Stream<ChatStreamEvent> streamChat(
     String model,
     List<ChatMessage> messages, {
-    bool? think,
-    String? thinkingLevel,
+    // true/false toggles thinking; a string ("low", "medium", "high",
+    // "max") sets the effort level. Omit for models without the thinking
+    // capability — Ollama rejects the parameter for them.
+    Object? think,
     List<Map<String, dynamic>>? tools,
     int? numCtx,
     double? temperature,
@@ -66,7 +80,7 @@ class OllamaService {
         'POST',
         Uri.parse('$baseUrl/api/chat'),
       );
-      request.headers['Content-Type'] = 'application/json';
+      request.headers.addAll(_jsonHeaders);
 
       final body = <String, dynamic>{
         'model': model,
@@ -74,12 +88,8 @@ class OllamaService {
         'stream': true,
       };
 
-      if (think == true) {
-        if (thinkingLevel != null) {
-          body['think'] = thinkingLevel;
-        } else {
-          body['think'] = true;
-        }
+      if (think != null) {
+        body['think'] = think;
       }
 
       if (tools != null && tools.isNotEmpty) {
@@ -111,45 +121,60 @@ class OllamaService {
           .transform(utf8.decoder)
           .transform(const LineSplitter())) {
         if (chunk.trim().isEmpty) continue;
+        final Map<String, dynamic> json;
         try {
-          final json = jsonDecode(chunk) as Map<String, dynamic>;
-          final message = json['message'] as Map<String, dynamic>?;
-          final isDone = json['done'] as bool? ?? false;
-
-          final evalCount = isDone ? json['eval_count'] as int? : null;
-          final evalDuration = isDone ? json['eval_duration'] as int? : null;
-
-          if (message != null) {
-            final content = message['content'] as String? ?? '';
-            final thinking = message['thinking'] as String?;
-            final rawToolCalls = message['tool_calls'] as List<dynamic>?;
-
-            List<Map<String, dynamic>>? parsedToolCalls;
-            if (rawToolCalls != null && rawToolCalls.isNotEmpty) {
-              parsedToolCalls = rawToolCalls
-                  .map((e) => Map<String, dynamic>.from(e as Map))
-                  .toList();
-            }
-
-            yield ChatStreamEvent(
-              contentToken: content.isNotEmpty ? content : null,
-              thinkingToken: thinking != null && thinking.isNotEmpty
-                  ? thinking
-                  : null,
-              toolCalls: parsedToolCalls,
-              done: isDone,
-              evalCount: evalCount,
-              evalDuration: evalDuration,
-            );
-          } else if (isDone) {
-            yield ChatStreamEvent(
-              done: true,
-              evalCount: evalCount,
-              evalDuration: evalDuration,
-            );
-          }
+          json = jsonDecode(chunk) as Map<String, dynamic>;
         } catch (_) {
           // skip malformed JSON lines
+          continue;
+        }
+
+        // Ollama reports failures (OOM, model load errors, …) as an
+        // in-stream error line on an otherwise-200 response — surface it
+        // instead of letting the response look complete.
+        final error = json['error'];
+        if (error != null) {
+          throw Exception('Ollama error: $error');
+        }
+
+        final message = json['message'] as Map<String, dynamic>?;
+        final isDone = json['done'] as bool? ?? false;
+
+        final evalCount = isDone ? json['eval_count'] as int? : null;
+        final evalDuration = isDone ? json['eval_duration'] as int? : null;
+        final promptEvalCount =
+            isDone ? json['prompt_eval_count'] as int? : null;
+
+        if (message != null) {
+          final content = message['content'] as String? ?? '';
+          final thinking = message['thinking'] as String?;
+          final rawToolCalls = message['tool_calls'] as List<dynamic>?;
+
+          List<Map<String, dynamic>>? parsedToolCalls;
+          if (rawToolCalls != null && rawToolCalls.isNotEmpty) {
+            parsedToolCalls = rawToolCalls
+                .map((e) => Map<String, dynamic>.from(e as Map))
+                .toList();
+          }
+
+          yield ChatStreamEvent(
+            contentToken: content.isNotEmpty ? content : null,
+            thinkingToken: thinking != null && thinking.isNotEmpty
+                ? thinking
+                : null,
+            toolCalls: parsedToolCalls,
+            done: isDone,
+            evalCount: evalCount,
+            evalDuration: evalDuration,
+            promptEvalCount: promptEvalCount,
+          );
+        } else if (isDone) {
+          yield ChatStreamEvent(
+            done: true,
+            evalCount: evalCount,
+            evalDuration: evalDuration,
+            promptEvalCount: promptEvalCount,
+          );
         }
       }
     } finally {
@@ -158,10 +183,38 @@ class OllamaService {
     }
   }
 
+  /// One-shot, non-streaming completion via /api/generate. Used for
+  /// utility prompts like conversation-title generation.
+  Future<String> generateText(String model, String prompt,
+      {Object? think}) async {
+    final response = await http
+        .post(
+          Uri.parse('$baseUrl/api/generate'),
+          headers: _jsonHeaders,
+          body: jsonEncode({
+            'model': model,
+            'prompt': prompt,
+            'stream': false,
+            'think': ?think,
+          }),
+        )
+        .timeout(const Duration(seconds: 60));
+
+    if (response.statusCode != 200) {
+      throw Exception('Failed to generate: HTTP ${response.statusCode}');
+    }
+    final data = jsonDecode(response.body) as Map<String, dynamic>;
+    final error = data['error'];
+    if (error != null) {
+      throw Exception('Ollama error: $error');
+    }
+    return data['response'] as String? ?? '';
+  }
+
   Future<List<String>> fetchModels() async {
     final response = await http.get(
       Uri.parse('$baseUrl/api/tags'),
-      headers: {'Content-Type': 'application/json'},
+      headers: _jsonHeaders,
     ).timeout(const Duration(seconds: 10));
 
     if (response.statusCode == 200) {
@@ -178,7 +231,7 @@ class OllamaService {
   Future<Map<String, dynamic>> fetchModelInfo(String model) async {
     final response = await http.post(
       Uri.parse('$baseUrl/api/show'),
-      headers: {'Content-Type': 'application/json'},
+      headers: _jsonHeaders,
       body: jsonEncode({'model': model}),
     ).timeout(const Duration(seconds: 10));
 
@@ -194,8 +247,13 @@ class OllamaService {
     String searxngUrl,
     String query,
   ) async {
-    final uri = Uri.parse(searxngUrl).replace(
-      path: '/search',
+    // Append /search to whatever path the instance lives under (e.g.
+    // http://host/searxng) instead of replacing it.
+    final base = Uri.parse(searxngUrl);
+    final basePath =
+        base.path.endsWith('/') ? base.path : '${base.path}/';
+    final uri = base.replace(
+      path: '${basePath}search',
       queryParameters: {'q': query, 'format': 'json'},
     );
 
@@ -217,6 +275,7 @@ class OllamaService {
     try {
       final response = await http.get(
         Uri.parse('$baseUrl/api/tags'),
+        headers: _jsonHeaders,
       ).timeout(const Duration(seconds: 5));
       return response.statusCode == 200;
     } catch (_) {
@@ -231,7 +290,7 @@ class OllamaService {
         'POST',
         Uri.parse('$baseUrl/api/pull'),
       );
-      request.headers['Content-Type'] = 'application/json';
+      request.headers.addAll(_jsonHeaders);
       request.body = jsonEncode({'model': modelName, 'stream': true});
 
       final response = await _pullClient!.send(request);
@@ -268,7 +327,7 @@ class OllamaService {
       'DELETE',
       Uri.parse('$baseUrl/api/delete'),
     );
-    request.headers['Content-Type'] = 'application/json';
+    request.headers.addAll(_jsonHeaders);
     request.body = jsonEncode({'model': name});
 
     final response = await http.Client().send(request);
@@ -333,8 +392,26 @@ class OllamaService {
     return results;
   }
 
+  /// Full tag list from `ollama.com/library/{model}/tags` — includes every
+  /// quantization variant (can be 100+ entries for popular models).
   Future<List<ModelTag>> fetchModelTagsFromWeb(String modelName) async {
-    final uri = Uri.https('ollama.com', '/library/$modelName/tags');
+    return _fetchTagsFromPage(
+      Uri.https('ollama.com', '/library/$modelName/tags'),
+      modelName,
+    );
+  }
+
+  /// Curated tag list from the model's overview page
+  /// (`ollama.com/library/{model}`) — the handful of primary tags the
+  /// website shows, without quantization variants.
+  Future<List<ModelTag>> fetchCuratedModelTags(String modelName) async {
+    return _fetchTagsFromPage(
+      Uri.https('ollama.com', '/library/$modelName'),
+      modelName,
+    );
+  }
+
+  Future<List<ModelTag>> _fetchTagsFromPage(Uri uri, String modelName) async {
     final response = await http.get(uri).timeout(const Duration(seconds: 15));
 
     if (response.statusCode != 200) {

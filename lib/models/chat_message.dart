@@ -9,6 +9,10 @@ class ChatMessage {
   List<Map<String, dynamic>>? toolCalls;
   List<Map<String, String>>? files; // each: {name, data (base64), type (mime)}
 
+  /// Marks a failed assistant turn — styled as an error and excluded from
+  /// the history sent back to the model.
+  bool isError;
+
   ChatMessage({
     required this.role,
     required this.content,
@@ -17,6 +21,7 @@ class ChatMessage {
     this.thinking,
     this.toolCalls,
     this.files,
+    this.isError = false,
   }) : timestamp = timestamp ?? DateTime.now();
 
   Map<String, dynamic> toApiMap() {
@@ -54,12 +59,15 @@ class ChatMessage {
     if (apiImages.isNotEmpty) {
       map['images'] = apiImages;
     }
+    if (toolCalls != null && toolCalls!.isNotEmpty) {
+      map['tool_calls'] = toolCalls;
+    }
     return map;
   }
 
   static bool _isImageExtension(String name) {
     final ext = name.split('.').last.toLowerCase();
-    return {'jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'pdf'}.contains(ext);
+    return {'jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp'}.contains(ext);
   }
 
   Map<String, dynamic> toJson() {
@@ -72,6 +80,7 @@ class ChatMessage {
     if (thinking != null) map['thinking'] = thinking;
     if (toolCalls != null) map['toolCalls'] = toolCalls;
     if (files != null) map['files'] = files;
+    if (isError) map['isError'] = true;
     return map;
   }
 
@@ -88,6 +97,7 @@ class ChatMessage {
       files: (json['files'] as List<dynamic>?)
           ?.map((e) => Map<String, String>.from(e as Map))
           .toList(),
+      isError: json['isError'] as bool? ?? false,
     );
   }
 }

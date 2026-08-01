@@ -9,7 +9,8 @@ void main() {
 
       expect(conv.title, 'New Chat');
       expect(conv.messages, isEmpty);
-      expect(conv.thinkingEnabled, isFalse);
+      // null = unset: thinking-capable models default to on (Ollama default)
+      expect(conv.thinkingEnabled, isNull);
       expect(conv.webSearchEnabled, isFalse);
       expect(conv.thinkingLevel, isNull);
       expect(conv.numCtx, isNull);
@@ -26,7 +27,14 @@ void main() {
         thinkingEnabled: true,
         thinkingLevel: 'high',
         webSearchEnabled: true,
+        systemPrompt: 'Be concise.',
         numCtx: 4096,
+        temperature: 0.7,
+        topK: 40,
+        topP: 0.9,
+        repeatPenalty: 1.1,
+        seed: 42,
+        lastContextTokens: 1234,
         messages: [
           ChatMessage(role: 'user', content: 'Hi', timestamp: ts),
           ChatMessage(
@@ -47,7 +55,14 @@ void main() {
       expect(restored.thinkingEnabled, isTrue);
       expect(restored.thinkingLevel, 'high');
       expect(restored.webSearchEnabled, isTrue);
+      expect(restored.systemPrompt, 'Be concise.');
       expect(restored.numCtx, 4096);
+      expect(restored.temperature, 0.7);
+      expect(restored.topK, 40);
+      expect(restored.topP, 0.9);
+      expect(restored.repeatPenalty, 1.1);
+      expect(restored.seed, 42);
+      expect(restored.lastContextTokens, 1234);
       expect(restored.messages.length, 2);
       expect(restored.messages[0].content, 'Hi');
       expect(restored.messages[1].thinking, 'I should greet back');

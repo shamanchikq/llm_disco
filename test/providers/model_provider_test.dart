@@ -64,6 +64,38 @@ void main() {
       expect(caps.supportsTools, isTrue);
     });
 
+    test('fetchModels keeps current selection when still installed', () async {
+      when(() => mockService.fetchModels())
+          .thenAnswer((_) async => ['llama3', 'phi3', 'gemma2']);
+      when(() => mockService.fetchModelInfo(any()))
+          .thenAnswer((_) async => <String, dynamic>{'capabilities': []});
+
+      await provider.fetchModels(mockService);
+      provider.selectModel('phi3');
+
+      // refetch happens after every model pull — must not reset selection
+      await provider.fetchModels(mockService);
+
+      expect(provider.selectedModel, 'phi3');
+    });
+
+    test('fetchModels falls back to first when selection was removed',
+        () async {
+      when(() => mockService.fetchModels())
+          .thenAnswer((_) async => ['llama3', 'phi3']);
+      when(() => mockService.fetchModelInfo(any()))
+          .thenAnswer((_) async => <String, dynamic>{'capabilities': []});
+
+      await provider.fetchModels(mockService);
+      provider.selectModel('phi3');
+
+      when(() => mockService.fetchModels())
+          .thenAnswer((_) async => ['llama3']);
+      await provider.fetchModels(mockService);
+
+      expect(provider.selectedModel, 'llama3');
+    });
+
     test('getCapabilities returns null for unknown model', () {
       expect(provider.getCapabilities('unknown'), isNull);
     });

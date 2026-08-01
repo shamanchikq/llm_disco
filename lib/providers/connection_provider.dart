@@ -18,6 +18,7 @@ class ConnectionProvider extends ChangeNotifier {
     required String ip,
     required String port,
     required bool useHttp,
+    String? authToken,
   }) async {
     _isConnecting = true;
     _error = null;
@@ -25,7 +26,15 @@ class ConnectionProvider extends ChangeNotifier {
 
     final protocol = useHttp ? 'http' : 'https';
     _baseUrl = '$protocol://$ip:$port';
-    _service = OllamaService(_baseUrl);
+    // A bare token becomes "Bearer <token>"; a value that already names a
+    // scheme ("Basic xyz…") is used as-is.
+    final token = authToken?.trim() ?? '';
+    final authHeader = token.isEmpty
+        ? null
+        : token.contains(' ')
+            ? token
+            : 'Bearer $token';
+    _service = OllamaService(_baseUrl, authHeader: authHeader);
 
     try {
       final success = await _service!.testConnection();

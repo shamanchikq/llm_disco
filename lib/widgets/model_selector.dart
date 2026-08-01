@@ -1,7 +1,100 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
+import '../models/model_capabilities.dart';
 import '../providers/connection_provider.dart';
 import '../providers/model_provider.dart';
+import '../theme/app_theme.dart';
+
+/// Graphite bottom-sheet model picker shared by the sidebar footer and the
+/// app bar's mid-chat model switcher. Shows capability badges for models
+/// whose capabilities are already cached.
+Future<void> showModelPickerSheet(
+  BuildContext context, {
+  required String? current,
+  required ValueChanged<String> onSelected,
+  String title = 'SELECT MODEL',
+}) {
+  final modelProvider = context.read<ModelProvider>();
+  final models = modelProvider.models;
+  if (models.isEmpty) return Future.value();
+  final theme = Theme.of(context);
+  final tokens = theme.extension<DiscoTokens>()!;
+
+  return showModalBottomSheet<void>(
+    context: context,
+    builder: (ctx) => SafeArea(
+      child: ListView(
+        shrinkWrap: true,
+        padding: const EdgeInsets.symmetric(vertical: 8),
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(20, 8, 20, 10),
+            child: Text(
+              title,
+              style: AppTheme.mono(
+                fontSize: 10.5,
+                letterSpacing: 0.6,
+                color: tokens.textFaint,
+              ),
+            ),
+          ),
+          for (final m in models)
+            ListTile(
+              dense: true,
+              leading: Icon(
+                m == current
+                    ? Icons.radio_button_checked_rounded
+                    : Icons.radio_button_off_rounded,
+                size: 18,
+                color: m == current
+                    ? theme.colorScheme.primary
+                    : tokens.textFaint,
+              ),
+              title: Text(m, style: AppTheme.mono(fontSize: 13)),
+              trailing: _CapabilityBadges(
+                capabilities: modelProvider.getCapabilities(m),
+                tokens: tokens,
+              ),
+              onTap: () {
+                Navigator.pop(ctx);
+                if (m != current) onSelected(m);
+              },
+            ),
+        ],
+      ),
+    ),
+  );
+}
+
+class _CapabilityBadges extends StatelessWidget {
+  final ModelCapabilities? capabilities;
+  final DiscoTokens tokens;
+
+  const _CapabilityBadges({required this.capabilities, required this.tokens});
+
+  @override
+  Widget build(BuildContext context) {
+    final caps = capabilities;
+    if (caps == null) return const SizedBox.shrink();
+    final icons = <IconData>[
+      if (caps.supportsVision) Icons.visibility_outlined,
+      if (caps.supportsThinking) Icons.psychology_outlined,
+      if (caps.supportsTools) Icons.build_outlined,
+      if (caps.supportsAudio) Icons.graphic_eq_rounded,
+    ];
+    if (icons.isEmpty) return const SizedBox.shrink();
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        for (final icon in icons)
+          Padding(
+            padding: const EdgeInsets.only(left: 6),
+            child: Icon(icon, size: 14, color: tokens.textFaint),
+          ),
+      ],
+    );
+  }
+}
 
 class ModelSelector extends StatelessWidget {
   const ModelSelector({super.key, this.compact = true});
@@ -32,39 +125,46 @@ class ModelSelector extends StatelessWidget {
       );
     }
 
-    return Container(
-      padding: compact
-          ? const EdgeInsets.symmetric(horizontal: 10)
-          : const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-      decoration: BoxDecoration(
-        color: colors.surfaceContainerHigh,
+    return Material(
+      color: colors.surfaceContainerHigh,
+      borderRadius: BorderRadius.circular(compact ? 10 : 12),
+      child: InkWell(
         borderRadius: BorderRadius.circular(compact ? 10 : 12),
-      ),
-      child: DropdownButton<String>(
-        value: modelProvider.selectedModel,
-        isDense: compact,
-        icon: Icon(
-          Icons.expand_more_rounded,
-          color: colors.primary,
-          size: compact ? 20 : 22,
-        ),
-        dropdownColor: colors.surfaceContainerHigh,
-        borderRadius: BorderRadius.circular(12),
-        underline: const SizedBox(),
-        style: (compact ? theme.textTheme.bodySmall : theme.textTheme.bodyMedium)
-            ?.copyWith(color: colors.onSurface),
-        items: modelProvider.models
-            .map((model) => DropdownMenuItem(
-                  value: model,
-                  child: Text(model, overflow: TextOverflow.ellipsis),
-                ))
-            .toList(),
-        onChanged: (value) {
-          if (value != null) {
-            final service = context.read<ConnectionProvider>().service;
-            modelProvider.selectModel(value, service: service);
-          }
+        onTap: () {
+          final connectionProvider = context.read<ConnectionProvider>();
+          final provider = context.read<ModelProvider>();
+          showModelPickerSheet(
+            context,
+            current: provider.selectedModel,
+            onSelected: (m) =>
+                provider.selectModel(m, service: connectionProvider.service),
+          );
         },
+        child: Padding(
+          padding: compact
+              ? const EdgeInsets.symmetric(horizontal: 10, vertical: 8)
+              : const EdgeInsets.symmetric(horizontal: 12, vertical: 11),
+          child: Row(
+            children: [
+              Expanded(
+                child: Text(
+                  modelProvider.selectedModel ?? '',
+                  style: AppTheme.mono(
+                    fontSize: compact ? 12 : 13,
+                    color: colors.onSurface,
+                  ),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+              Icon(
+                Icons.expand_more_rounded,
+                color: colors.primary,
+                size: compact ? 20 : 22,
+              ),
+            ],
+          ),
+        ),
       ),
     );
   }

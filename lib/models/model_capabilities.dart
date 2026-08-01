@@ -1,16 +1,20 @@
 class ModelCapabilities {
   final bool supportsVision;
   final bool supportsThinking;
-  final String? thinkingMode; // 'always' (no toggle) or 'levels' (effort selector)
+
+  /// 'levels' — effort selector, always on (gpt-oss);
+  /// 'toggle' — on/off switch with optional effort level (all other
+  /// thinking-capable models).
+  final String? thinkingMode;
   final bool supportsTools;
-  final bool supportsFiles;
+  final bool supportsAudio;
 
   const ModelCapabilities({
     this.supportsVision = false,
     this.supportsThinking = false,
     this.thinkingMode,
     this.supportsTools = false,
-    this.supportsFiles = false,
+    this.supportsAudio = false,
   });
 
   Map<String, dynamic> toJson() {
@@ -19,7 +23,7 @@ class ModelCapabilities {
       'supportsThinking': supportsThinking,
       'thinkingMode': thinkingMode,
       'supportsTools': supportsTools,
-      'supportsFiles': supportsFiles,
+      'supportsAudio': supportsAudio,
     };
   }
 
@@ -29,7 +33,7 @@ class ModelCapabilities {
       supportsThinking: json['supportsThinking'] as bool? ?? false,
       thinkingMode: json['thinkingMode'] as String?,
       supportsTools: json['supportsTools'] as bool? ?? false,
-      supportsFiles: json['supportsFiles'] as bool? ?? false,
+      supportsAudio: json['supportsAudio'] as bool? ?? false,
     );
   }
 }
