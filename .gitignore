@@ -43,3 +43,6 @@ app.*.map.json
 /android/app/debug
 /android/app/profile
 /android/app/release
+
+# Design mockups and reference screenshots, kept locally only
+redesign/
