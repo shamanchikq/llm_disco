@@ -150,4 +150,20 @@ void main() {
       expect(emptyImg.toApiMap().containsKey('images'), isFalse);
     });
   });
+
+  group('cutOff', () {
+    test('round-trips through storage and defaults to false', () {
+      final cut = ChatMessage(role: 'assistant', content: 'partial', cutOff: true);
+      expect(ChatMessage.fromJson(cut.toJson()).cutOff, isTrue);
+
+      final whole = ChatMessage(role: 'assistant', content: 'done');
+      expect(whole.toJson().containsKey('cutOff'), isFalse);
+      expect(ChatMessage.fromJson(whole.toJson()).cutOff, isFalse);
+    });
+
+    test('is never sent to the model', () {
+      final cut = ChatMessage(role: 'assistant', content: 'partial', cutOff: true);
+      expect(cut.toApiMap().keys, unorderedEquals(['role', 'content']));
+    });
+  });
 }

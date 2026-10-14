@@ -13,6 +13,11 @@ class ChatMessage {
   /// the history sent back to the model.
   bool isError;
 
+  /// The model stopped because it hit its output length limit (Ollama's
+  /// `done_reason: "length"`). Shown as a note on the bubble; never part of
+  /// the content, so it isn't sent back to the model.
+  bool cutOff;
+
   ChatMessage({
     required this.role,
     required this.content,
@@ -22,6 +27,7 @@ class ChatMessage {
     this.toolCalls,
     this.files,
     this.isError = false,
+    this.cutOff = false,
   }) : timestamp = timestamp ?? DateTime.now();
 
   Map<String, dynamic> toApiMap() {
@@ -81,6 +87,7 @@ class ChatMessage {
     if (toolCalls != null) map['toolCalls'] = toolCalls;
     if (files != null) map['files'] = files;
     if (isError) map['isError'] = true;
+    if (cutOff) map['cutOff'] = true;
     return map;
   }
 
@@ -103,6 +110,7 @@ class ChatMessage {
       // this prefix; an explicit value in the JSON always wins.
       isError: json['isError'] as bool? ??
           (role == 'assistant' && content.startsWith('[Error:')),
+      cutOff: json['cutOff'] as bool? ?? false,
     );
   }
 }
