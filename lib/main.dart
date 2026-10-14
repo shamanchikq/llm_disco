@@ -10,6 +10,7 @@ import 'models/conversation.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  AppTheme.useBundledFonts();
   final storage = StorageService();
   final saved = await storage.loadConversations();
   runApp(LLMChatApp(storageService: storage, savedConversations: saved));

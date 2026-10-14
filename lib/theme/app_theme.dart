@@ -1,4 +1,6 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:google_fonts/google_fonts.dart';
 
 @immutable
@@ -151,6 +153,38 @@ class AppTheme {
 
   static const radius = 14.0;
 
+  /// Weights bundled under assets/google_fonts/. With runtime fetching off,
+  /// any other weight would silently fall back to the system font — add its
+  /// file there (named `<Family>-<Weight>.ttf`) before using it.
+  static final _bundledDisplayWeights = {
+    FontWeight.w400,
+    FontWeight.w500,
+    FontWeight.w600,
+    FontWeight.w700,
+    FontWeight.w800,
+  };
+  static final _bundledMonoWeights = {FontWeight.w400};
+
+  static bool _fontsConfigured = false;
+
+  /// Serves both families from the app bundle only — never from Google's
+  /// servers — and registers their OFL licences. Call once before runApp.
+  static void useBundledFonts() {
+    GoogleFonts.config.allowRuntimeFetching = false;
+    if (_fontsConfigured) return;
+    _fontsConfigured = true;
+    LicenseRegistry.addLicense(() async* {
+      for (final (family, file) in [
+        ('Hanken Grotesk', 'HankenGrotesk'),
+        ('JetBrains Mono', 'JetBrainsMono'),
+      ]) {
+        final text =
+            await rootBundle.loadString('assets/google_fonts/$file-OFL.txt');
+        yield LicenseEntryWithLineBreaks([family], text);
+      }
+    });
+  }
+
   /// Hanken Grotesk — display face for titles and headings.
   static TextStyle display({
     double? fontSize,
@@ -158,14 +192,17 @@ class AppTheme {
     Color? color,
     double? letterSpacing,
     double? height,
-  }) =>
-      GoogleFonts.hankenGrotesk(
-        fontSize: fontSize,
-        fontWeight: fontWeight,
-        color: color,
-        letterSpacing: letterSpacing,
-        height: height,
-      );
+  }) {
+    assert(_bundledDisplayWeights.contains(fontWeight ?? FontWeight.w400),
+        'Hanken Grotesk $fontWeight is not bundled in assets/google_fonts/');
+    return GoogleFonts.hankenGrotesk(
+      fontSize: fontSize,
+      fontWeight: fontWeight,
+      color: color,
+      letterSpacing: letterSpacing,
+      height: height,
+    );
+  }
 
   /// JetBrains Mono — metadata, model names, code.
   static TextStyle mono({
@@ -175,15 +212,21 @@ class AppTheme {
     double? letterSpacing,
     double? height,
     FontStyle? fontStyle,
-  }) =>
-      GoogleFonts.jetBrainsMono(
-        fontSize: fontSize,
-        fontWeight: fontWeight,
-        color: color,
-        letterSpacing: letterSpacing,
-        height: height,
-        fontStyle: fontStyle,
-      );
+  }) {
+    assert(
+        _bundledMonoWeights.contains(fontWeight ?? FontWeight.w400) &&
+            fontStyle != FontStyle.italic,
+        'JetBrains Mono $fontWeight $fontStyle is not bundled in '
+        'assets/google_fonts/');
+    return GoogleFonts.jetBrainsMono(
+      fontSize: fontSize,
+      fontWeight: fontWeight,
+      color: color,
+      letterSpacing: letterSpacing,
+      height: height,
+      fontStyle: fontStyle,
+    );
+  }
 
   /// Hanken Grotesk applied to every slot of [base]. google_fonts 9 builds
   /// its `hankenGroteskTextTheme()` on `package:material_ui`, whose
