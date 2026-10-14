@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Auto Backup rules for Android 11 and below (android:fullBackupContent).
+  Android 12+ uses data_extraction_rules.xml instead; keep the two in sync.
+
+  The app keeps its data in the Flutter documents directory, which path_provider
+  maps to getDir("flutter"), i.e. <app data dir>/app_flutter. domain="root" is
+  that app data dir, so every path below is relative to it.
+
+  Chats (conversations.json) are meant to follow the user to a new phone, so they
+  are NOT excluded. Excluded instead:
+    - connection_settings.json / saved_connections.json hold server details and
+      the auth token in plaintext, and must never leave the device.
+    - the .bak / .tmp / .corrupt files are redundant copies of the above that
+      only waste the 25 MB cloud backup quota.
+  Everything not excluded stays included (the default).
+-->
+<full-backup-content>
+    <exclude domain="root" path="app_flutter/connection_settings.json" />
+    <exclude domain="root" path="app_flutter/connection_settings.json.tmp" />
+    <exclude domain="root" path="app_flutter/saved_connections.json" />
+    <exclude domain="root" path="app_flutter/saved_connections.json.tmp" />
+    <exclude domain="root" path="app_flutter/conversations.json.bak" />
+    <exclude domain="root" path="app_flutter/conversations.json.tmp" />
+    <exclude domain="root" path="app_flutter/conversations.json.corrupt" />
+</full-backup-content>

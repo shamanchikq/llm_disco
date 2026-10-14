@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Backup / device-transfer rules for Android 12+ (API 31+).
+
+  The app keeps its data in the Flutter documents directory, which path_provider
+  maps to getDir("flutter"), i.e. <app data dir>/app_flutter. domain="root" is
+  that app data dir, so every path below is relative to it.
+
+  Chats (conversations.json) are meant to follow the user to a new phone, so they
+  are NOT excluded. Excluded instead:
+    - connection_settings.json / saved_connections.json hold server details and
+      the auth token in plaintext, and must never leave the device.
+    - the .bak / .tmp / .corrupt files are redundant copies of the above that
+      only waste the 25 MB cloud backup quota.
+  Both sections are listed because a rule set only applies to the mode it is
+  declared in; a missing section would mean "back up everything" for that mode.
+  Everything not excluded stays included (the default).
+-->
+<data-extraction-rules>
+    <cloud-backup>
+        <exclude domain="root" path="app_flutter/connection_settings.json" />
+        <exclude domain="root" path="app_flutter/connection_settings.json.tmp" />
+        <exclude domain="root" path="app_flutter/saved_connections.json" />
+        <exclude domain="root" path="app_flutter/saved_connections.json.tmp" />
+        <exclude domain="root" path="app_flutter/conversations.json.bak" />
+        <exclude domain="root" path="app_flutter/conversations.json.tmp" />
+        <exclude domain="root" path="app_flutter/conversations.json.corrupt" />
+    </cloud-backup>
+    <device-transfer>
+        <exclude domain="root" path="app_flutter/connection_settings.json" />
+        <exclude domain="root" path="app_flutter/connection_settings.json.tmp" />
+        <exclude domain="root" path="app_flutter/saved_connections.json" />
+        <exclude domain="root" path="app_flutter/saved_connections.json.tmp" />
+        <exclude domain="root" path="app_flutter/conversations.json.bak" />
+        <exclude domain="root" path="app_flutter/conversations.json.tmp" />
+        <exclude domain="root" path="app_flutter/conversations.json.corrupt" />
+    </device-transfer>
+</data-extraction-rules>
