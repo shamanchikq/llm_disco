@@ -85,9 +85,11 @@ class ChatMessage {
   }
 
   factory ChatMessage.fromJson(Map<String, dynamic> json) {
+    final String role = json['role'];
+    final String content = json['content'];
     return ChatMessage(
-      role: json['role'],
-      content: json['content'],
+      role: role,
+      content: content,
       timestamp: DateTime.parse(json['timestamp']),
       images: (json['images'] as List<dynamic>?)?.cast<String>(),
       thinking: json['thinking'] as String?,
@@ -97,7 +99,10 @@ class ChatMessage {
       files: (json['files'] as List<dynamic>?)
           ?.map((e) => Map<String, String>.from(e as Map))
           .toList(),
-      isError: json['isError'] as bool? ?? false,
+      // Before the flag existed, errors were stored as assistant text with
+      // this prefix; an explicit value in the JSON always wins.
+      isError: json['isError'] as bool? ??
+          (role == 'assistant' && content.startsWith('[Error:')),
     );
   }
 }

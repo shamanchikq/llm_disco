@@ -1,5 +1,5 @@
 name: llm_disco_test1
-description: "A new Flutter project."
+description: "LLM Disco — chat with locally-hosted Ollama models from your phone."
 # The following line prevents the package from being accidentally published to
 # pub.dev using `flutter pub publish`. This is preferred for private packages.
 publish_to: 'none' # Remove this line if you wish to publish to pub.dev
@@ -64,9 +64,11 @@ dev_dependencies:
 flutter_launcher_icons:
   android: true
   ios: false
-  image_path: "FYP/LLM Disco Icon.png"
+  # Lives in assets/ — the FYP/ snapshot is a local-only folder and must
+  # not be load-bearing for builds.
+  image_path: "assets/app_icon.png"
   adaptive_icon_background: "#0a1929"
-  adaptive_icon_foreground: "FYP/LLM Disco Icon.png"
+  adaptive_icon_foreground: "assets/app_icon.png"
 
 # For information on the generic Dart part of this file, see the
 # following page: https://dart.dev/tools/pub/pubspec

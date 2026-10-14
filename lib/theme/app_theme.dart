@@ -57,7 +57,7 @@ class MessageColors extends ThemeExtension<MessageColors> {
   }
 }
 
-/// Ember design tokens (redesign/app.css, [data-style="ember"]).
+/// Graphite design tokens (redesign/app.css, [data-style="graphite"]).
 @immutable
 class DiscoTokens extends ThemeExtension<DiscoTokens> {
   final Color line;

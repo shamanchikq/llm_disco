@@ -41,7 +41,7 @@ class LLMChatApp extends StatelessWidget {
       ],
       child: MaterialApp(
         debugShowCheckedModeBanner: false,
-        title: 'LLM Chat',
+        title: 'LLM Disco',
         theme: AppTheme.dark,
         home: const ConnectionScreen(),
       ),

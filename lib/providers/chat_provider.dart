@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:flutter/widgets.dart';
 
@@ -18,7 +19,11 @@ class ChatProvider extends ChangeNotifier with WidgetsBindingObserver {
   /// Scoped rather than a plain bool so browsing to another chat mid-stream
   /// doesn't make that chat look busy — or, worse, receive the fallout.
   String? _streamingConversationId;
-  bool _cancelRequested = false;
+
+  /// The exchange (one send plus its tool-loop legs) in flight, or null.
+  /// Cancellation is per exchange, not a provider-wide flag, so a stop or
+  /// disconnect can only ever end the exchange it was meant for.
+  _Exchange? _currentExchange;
   final List<String> _pendingImages = [];
   String? _pendingFileName;
   String? _pendingFileBase64;
@@ -136,7 +141,8 @@ class ChatProvider extends ChangeNotifier with WidgetsBindingObserver {
     final existingIds = _conversations.map((c) => c.id).toSet();
     int added = 0;
     for (final conv in imported) {
-      if (!existingIds.contains(conv.id)) {
+      // add() also dedupes within the batch itself
+      if (existingIds.add(conv.id)) {
         _conversations.insert(0, conv);
         added++;
       }
@@ -152,72 +158,104 @@ class ChatProvider extends ChangeNotifier with WidgetsBindingObserver {
     deleteConversationForUndo(id);
   }
 
+  bool get _canSend =>
+      _service != null &&
+      _activeConversation != null &&
+      // One generation at a time — the service shares a single cancellable
+      // client, so a concurrent send would orphan the first stream.
+      _streamingConversationId == null;
+
   Future<void> sendMessage(String content,
       {ModelCapabilities? capabilities}) async {
-    if (_service == null || _activeConversation == null) return;
-    // One generation at a time — the service shares a single cancellable
-    // client, so a concurrent send would orphan the first stream.
-    if (_streamingConversationId != null) return;
+    if (!_canSend) return;
 
-    // Captured up front: every later step must target this conversation
-    // even if the user browses to another one mid-stream.
-    final conv = _activeConversation!;
-
-    final userMessage = ChatMessage(
-      role: 'user',
-      content: content,
-      images: _pendingImages.isNotEmpty ? List.of(_pendingImages) : null,
-      files: _pendingFileBase64 != null
-          ? [{'name': _pendingFileName!, 'data': _pendingFileBase64!, 'type': _pendingFileMimeType!}]
-          : null,
-    );
+    final images = _pendingImages.isNotEmpty ? List.of(_pendingImages) : null;
+    final files = _pendingFileBase64 != null
+        ? [
+            {
+              'name': _pendingFileName!,
+              'data': _pendingFileBase64!,
+              'type': _pendingFileMimeType!,
+            }
+          ]
+        : null;
     _pendingImages.clear();
     _pendingFileName = null;
     _pendingFileBase64 = null;
     _pendingFileMimeType = null;
+
+    await _send(content, images, files, capabilities);
+  }
+
+  /// Sends with explicitly supplied attachments. Retry and edit go through
+  /// here with the old message's own attachments so they never read or
+  /// consume what the user has staged in the composer for their next one.
+  Future<void> _send(
+    String content,
+    List<String>? images,
+    List<Map<String, String>>? files,
+    ModelCapabilities? capabilities,
+  ) async {
+    // Captured up front: every later step must target this conversation,
+    // service and model even if the user browses to another chat, reconnects
+    // or switches models mid-stream.
+    final service = _service;
+    final conv = _activeConversation;
+    if (service == null || conv == null || _streamingConversationId != null) {
+      return;
+    }
+    final model = conv.model;
+
+    final userMessage = ChatMessage(
+      role: 'user',
+      content: content,
+      images: images,
+      files: files,
+    );
     conv.messages.add(userMessage);
 
-    // Auto-title from first user message
-    if (conv.messages.where((m) => m.role == 'user').length == 1) {
+    // Auto-title from the first user message — but only while the title is
+    // still the untouched default, so retrying or editing an opening
+    // message never downgrades a model-generated or manual title.
+    if (conv.title == 'New Chat' &&
+        conv.messages.where((m) => m.role == 'user').length == 1) {
       conv.title = autoTitleFor(content);
     }
 
+    final exchange = _Exchange(service, userMessage);
+    _currentExchange = exchange;
     conv.lastTokensPerSec = null;
     _streamingConversationId = conv.id;
-    _cancelRequested = false;
     notifyListeners();
 
     try {
-      await _streamResponse(conv, capabilities);
-      _maybeGenerateTitle(conv, capabilities);
-    } catch (e) {
-      final messages = conv.messages;
-      if (messages.isNotEmpty && messages.last.role == 'assistant') {
-        final last = messages.last;
-        if (last.content.isNotEmpty) {
-          // Partial content exists — mark as interrupted, not error
-          last.content += '\n\n*[Response interrupted]*';
-        } else if (!_cancelRequested) {
-          last.content = e.toString();
-          last.isError = true;
-        } else if (last.thinking != null) {
-          // User stopped during the thinking phase — keep what arrived.
-          last.content = '*[Stopped]*';
-        } else {
-          // User stopped before anything arrived — nothing to show.
-          messages.removeLast();
-        }
+      await _streamResponse(conv, exchange, model, capabilities);
+      // A stopped exchange may be orphaned (disconnect) — leave it be.
+      if (!exchange.cancelled) {
+        _maybeGenerateTitle(conv, service, model, capabilities);
       }
+    } catch (e) {
+      _recoverFailedExchange(conv, exchange, e);
     } finally {
-      _cancelPersistTimer();
-      _streamingConversationId = null;
+      // A detached exchange (disconnect, delete) winds down here too; it
+      // must not clear state that belongs to one started after it.
+      if (identical(_currentExchange, exchange)) {
+        _cancelPersistTimer();
+        _currentExchange = null;
+        _streamingConversationId = null;
+      }
       notifyListeners();
       _persist();
     }
   }
 
-  Future<void> _streamResponse(
-      Conversation conv, ModelCapabilities? capabilities) async {
+  /// How many request/response legs one send may take: each leg that ends in
+  /// tool calls is followed by another with the results.
+  static const _maxLegs = 5;
+
+  Future<void> _streamResponse(Conversation conv, _Exchange exchange,
+      String model, ModelCapabilities? capabilities) async {
+    final service = exchange.service;
     final bool webSearchEnabled = conv.webSearchEnabled;
 
     // Only send the think parameter for models with the thinking
@@ -235,18 +273,29 @@ class ChatProvider extends ChangeNotifier with WidgetsBindingObserver {
       }
     }
 
-    // Build tools list if web search is enabled
+    // Build tools list if web search is enabled. A chat can keep the toggle
+    // on after switching to a model without the tools capability (the chip
+    // is hidden there) — Ollama rejects tools for those, so leave them out.
     List<Map<String, dynamic>>? tools;
-    if (webSearchEnabled && _searxngUrl != null) {
+    if (webSearchEnabled &&
+        _searxngUrl != null &&
+        capabilities?.supportsTools != false) {
       tools = [_webSearchToolDefinition()];
     }
 
     _startPersistTimer();
 
     // Tool-calling loop: may iterate if model requests tool calls
-    for (var iteration = 0; iteration < 5; iteration++) {
+    for (var leg = 0; leg < _maxLegs; leg++) {
+      exchange.throwIfCancelled();
+
+      // The last leg goes out without tools so the model has to answer in
+      // text instead of ending the exchange on another round of results.
+      final isLastLeg = leg == _maxLegs - 1;
+
       final assistantMessage = ChatMessage(role: 'assistant', content: '');
       conv.messages.add(assistantMessage);
+      exchange.appended.add(assistantMessage);
       notifyListeners();
 
       // Assistant messages that only carried tool calls have empty content
@@ -272,13 +321,14 @@ class ChatProvider extends ChangeNotifier with WidgetsBindingObserver {
             0, ChatMessage(role: 'system', content: systemPrompt));
       }
 
-      List<Map<String, dynamic>>? receivedToolCalls;
+      // Ollama may spread parallel calls over several chunks.
+      final receivedToolCalls = <Map<String, dynamic>>[];
 
-      await for (final event in _service!.streamChat(
-        conv.model,
+      await for (final event in service.streamChat(
+        model,
         messagesToSend,
         think: think,
-        tools: tools,
+        tools: isLastLeg ? null : tools,
         numCtx: conv.numCtx,
         temperature: conv.temperature,
         topK: conv.topK,
@@ -296,7 +346,7 @@ class ChatProvider extends ChangeNotifier with WidgetsBindingObserver {
           notifyListeners();
         }
         if (event.toolCalls != null) {
-          receivedToolCalls = event.toolCalls;
+          receivedToolCalls.addAll(event.toolCalls!);
         }
         if (event.evalCount != null && event.evalDuration != null && event.evalDuration! > 0) {
           conv.lastTokensPerSec =
@@ -311,52 +361,189 @@ class ChatProvider extends ChangeNotifier with WidgetsBindingObserver {
         }
       }
 
-      // If no tool calls, we're done
-      if (receivedToolCalls == null || receivedToolCalls.isEmpty) {
+      // No tool calls (or none honoured on the tool-less last leg): the
+      // exchange is done.
+      if (receivedToolCalls.isEmpty || isLastLeg) {
+        // A model that returned nothing at all would otherwise leave a
+        // permanent empty bubble. Say so instead: an error bubble offers
+        // retry and never goes back to the model as history.
+        if (assistantMessage.content.isEmpty &&
+            (assistantMessage.thinking?.isEmpty ?? true)) {
+          assistantMessage
+            ..content = 'The model returned an empty response.'
+            ..isError = true;
+        }
         break;
       }
 
+      // A stop that landed after the leg finished must not start a search.
+      exchange.throwIfCancelled();
+
       // Store tool calls on the assistant message
-      assistantMessage.toolCalls = receivedToolCalls;
+      assistantMessage.toolCalls = _withObjectArguments(receivedToolCalls);
 
-      // Execute each tool call
+      // Execute each tool call — exactly one tool message per call.
       for (final toolCall in receivedToolCalls) {
-        final function = toolCall['function'] as Map<String, dynamic>?;
-        if (function == null) continue;
-
-        final name = function['name'] as String?;
-        final args = function['arguments'] as Map<String, dynamic>? ?? {};
-
-        String toolResult;
-        if (name == 'web_search' && _searxngUrl != null) {
-          final query = args['query'] as String? ?? '';
-          try {
-            final results =
-                await _service!.searchSearXNG(_searxngUrl!, query);
-            final buffer = StringBuffer();
-            for (final r in results) {
-              buffer.writeln('Title: ${r['title'] ?? ''}');
-              buffer.writeln('URL: ${r['url'] ?? ''}');
-              buffer.writeln('Snippet: ${r['content'] ?? ''}');
-              buffer.writeln();
-            }
-            toolResult = buffer.toString();
-          } catch (e) {
-            toolResult = 'Search error: $e';
-          }
-        } else {
-          toolResult = 'Unknown tool: $name';
-        }
-
-        conv.messages.add(ChatMessage(
-          role: 'tool',
-          content: toolResult,
-        ));
+        final result = await _runToolCall(exchange, toolCall);
+        exchange.throwIfCancelled();
+        final toolMessage = ChatMessage(role: 'tool', content: result);
+        conv.messages.add(toolMessage);
+        exchange.appended.add(toolMessage);
       }
 
       notifyListeners();
       // Loop continues — model will generate a final response using tool results
     }
+  }
+
+  /// Runs one tool call and returns the text handed back to the model.
+  /// Only throws [_ExchangeCancelled]: anything the model got wrong becomes
+  /// the tool result, so it can correct itself instead of the whole
+  /// exchange failing.
+  Future<String> _runToolCall(
+      _Exchange exchange, Map<String, dynamic> toolCall) async {
+    exchange.throwIfCancelled();
+    final function = toolCall['function'];
+    if (function is! Map) return 'Invalid tool call: missing function.';
+
+    final name = function['name']?.toString();
+    final searxngUrl = _searxngUrl;
+    if (name != 'web_search' || searxngUrl == null) {
+      return 'Unknown tool: $name';
+    }
+
+    final Map<String, dynamic> args;
+    try {
+      args = _parseToolArguments(function['arguments']);
+    } catch (e) {
+      return 'Invalid tool arguments: ${e is FormatException ? e.message : e}';
+    }
+    final query = args['query']?.toString() ?? '';
+
+    try {
+      // Raced against the stop signal: a search can take many seconds, and
+      // Stop has no HTTP stream to abort between legs.
+      final results = await Future.any([
+        exchange.service.searchSearXNG(searxngUrl, query),
+        exchange.whenCancelled.then((_) => const <Map<String, dynamic>>[]),
+      ]);
+      exchange.throwIfCancelled();
+      if (results.isEmpty) return 'No results found.';
+      final buffer = StringBuffer();
+      for (final r in results) {
+        buffer.writeln('Title: ${r['title'] ?? ''}');
+        buffer.writeln('URL: ${r['url'] ?? ''}');
+        buffer.writeln('Snippet: ${r['content'] ?? ''}');
+        buffer.writeln();
+      }
+      return buffer.toString();
+    } on _ExchangeCancelled {
+      rethrow;
+    } catch (e) {
+      return 'Search error: $e';
+    }
+  }
+
+  /// Ollama normally sends arguments as an object, but some models emit a
+  /// JSON-encoded string instead.
+  static Map<String, dynamic> _parseToolArguments(Object? raw) {
+    if (raw == null) return {};
+    if (raw is Map) return Map<String, dynamic>.from(raw);
+    if (raw is String) {
+      if (raw.trim().isEmpty) return {};
+      final decoded = jsonDecode(raw);
+      if (decoded is Map) return Map<String, dynamic>.from(decoded);
+      throw const FormatException('expected a JSON object');
+    }
+    throw FormatException('expected an object, got ${raw.runtimeType}');
+  }
+
+  /// Ollama rejects a resent tool call whose arguments aren't an object, so
+  /// string-encoded (or unusable) arguments are normalised before the call
+  /// is stored in the history.
+  static List<Map<String, dynamic>> _withObjectArguments(
+      List<Map<String, dynamic>> calls) {
+    final result = <Map<String, dynamic>>[];
+    for (final call in calls) {
+      final function = call['function'];
+      if (function is! Map || function['arguments'] is Map) {
+        result.add(call);
+        continue;
+      }
+      Map<String, dynamic> args;
+      try {
+        args = _parseToolArguments(function['arguments']);
+      } catch (_) {
+        args = {};
+      }
+      result.add({
+        ...call,
+        'function': {...Map<String, dynamic>.from(function), 'arguments': args},
+      });
+    }
+    return result;
+  }
+
+  /// Rebuilds the conversation tail after a failed or cancelled exchange:
+  /// drops every assistant/tool message the exchange appended (including any
+  /// tool-loop iterations), then restores what the user should see —
+  /// partial output kept as interrupted, a genuine failure as an error
+  /// bubble, a user stop quietly removed unless thinking had arrived.
+  void _recoverFailedExchange(
+      Conversation conv, _Exchange exchange, Object e) {
+    // Remember whatever streamed into the newest assistant bubble of this
+    // exchange before rolling back.
+    ChatMessage? streamed;
+    for (final m in exchange.appended.reversed) {
+      if (m.role == 'assistant') {
+        if (m.content.isNotEmpty || (m.thinking?.isNotEmpty ?? false)) {
+          streamed = m;
+        }
+        break;
+      }
+    }
+
+    // Roll back by identity rather than by position: an orphaned exchange
+    // can wind down after a later one has added messages to the same chat.
+    // A preserved partial loses its tool calls on purpose: their results are
+    // discarded with the rest of the failed tail.
+    final partialThinking = streamed?.thinking;
+    streamed?.toolCalls = null;
+    final userIndex = conv.messages.indexOf(exchange.userMessage);
+    conv.messages.removeWhere(exchange.appended.contains);
+    // The user deleted the exchange meanwhile — nothing left to attach to.
+    if (userIndex < 0) return;
+    final insertAt = userIndex + 1;
+
+    if (streamed != null && streamed.content.isNotEmpty) {
+      // Partial output survives a stop or failure either way; label it so
+      // it doesn't read as a complete answer.
+      streamed.content += '\n\n*[Response interrupted]*';
+      conv.messages.insert(insertAt, streamed);
+      return;
+    }
+
+    if (exchange.cancelled) {
+      // Stopped during the thinking phase — keep what arrived; stopped
+      // before anything arrived — nothing to show.
+      if (partialThinking != null) {
+        conv.messages.insert(
+            insertAt,
+            ChatMessage(
+              role: 'assistant',
+              content: '*[Stopped]*',
+              thinking: partialThinking,
+            ));
+      }
+      return;
+    }
+
+    // Genuine failure — an error bubble, carrying any reasoning that had
+    // already streamed in so it isn't lost to the collapse.
+    final error = ChatMessage(role: 'assistant', content: e.toString());
+    error.isError = true;
+    if (partialThinking != null) error.thinking = partialThinking;
+    conv.messages.insert(insertAt, error);
   }
 
   Map<String, dynamic> _webSearchToolDefinition() {
@@ -415,10 +602,58 @@ class ChatProvider extends ChangeNotifier with WidgetsBindingObserver {
   }
 
   void restoreConversation(Conversation conversation, int index) {
+    // Undo can fire twice, or after the same chat was re-imported.
+    if (_conversations.any((c) => c.id == conversation.id)) return;
     _conversations.insert(
         index.clamp(0, _conversations.length), conversation);
     notifyListeners();
     _persist();
+  }
+
+  /// How long a swipe-deleted conversation stays restorable.
+  static const undoWindow = Duration(seconds: 5);
+
+  /// Swipe-deleted conversations still inside their undo window, oldest
+  /// first. Held here rather than in the sidebar: the drawer's state is
+  /// rebuilt every time it opens, which dropped the undo offer the moment
+  /// the drawer closed.
+  final List<(Conversation, int)> _pendingUndo = [];
+  Timer? _undoTimer;
+
+  /// How many deleted conversations [undoDelete] would bring back.
+  int get undoableDeletes => _pendingUndo.length;
+
+  /// Deletes a conversation and keeps it restorable for [undoWindow].
+  void deleteConversationWithUndo(String id) {
+    final removed = deleteConversationForUndo(id);
+    if (removed == null) return;
+    _pendingUndo.add(removed);
+    // One window for the whole batch — a further delete restarts it rather
+    // than making the earlier one unrecoverable.
+    _undoTimer?.cancel();
+    _undoTimer = Timer(undoWindow, _dropPendingUndo);
+    notifyListeners();
+  }
+
+  /// Restores everything deleted within the current undo window.
+  void undoDelete() {
+    _undoTimer?.cancel();
+    _undoTimer = null;
+    // Newest first, so each chat lands back on the index it was removed from.
+    final pending = _pendingUndo.reversed.toList();
+    _pendingUndo.clear();
+    for (final (conversation, index) in pending) {
+      restoreConversation(conversation, index);
+    }
+    notifyListeners();
+  }
+
+  void _dropPendingUndo() {
+    _undoTimer?.cancel();
+    _undoTimer = null;
+    if (_pendingUndo.isEmpty) return;
+    _pendingUndo.clear();
+    notifyListeners();
   }
 
   /// Pre-fills the chat input (used by empty-state starter chips).
@@ -438,27 +673,39 @@ class ChatProvider extends ChangeNotifier with WidgetsBindingObserver {
       {ModelCapabilities? capabilities}) async {
     final conv = _activeConversation;
     if (conv == null || message.role != 'user') return;
+    // Guard BEFORE touching history: a rejected resend (disconnected, or
+    // another chat generating) must not truncate the conversation.
+    if (_service == null) return;
+    if (_streamingConversationId != null) return;
     final index = conv.messages.indexOf(message);
     if (index < 0) return;
+
+    // If the title is the fallback derived from THIS opening message, move
+    // it in step with the edit; generated/manual titles are left alone, and
+    // a later message that merely repeats the opener's text isn't the opener.
+    final opener = conv.messages.where((m) => m.role == 'user').firstOrNull;
+    if (identical(opener, message) &&
+        conv.title == autoTitleFor(message.content)) {
+      conv.title = autoTitleFor(newContent);
+    }
 
     final images = message.images;
     final files = message.files;
     conv.messages.removeRange(index, conv.messages.length);
     notifyListeners();
 
-    if (images != null && images.isNotEmpty) {
-      _pendingImages
-        ..clear()
-        ..addAll(images);
-    }
-    if (files != null && files.isNotEmpty) {
-      final f = files.first;
-      _pendingFileName = f['name'];
-      _pendingFileBase64 = f['data'];
-      _pendingFileMimeType = f['type'];
-    }
-    await sendMessage(newContent, capabilities: capabilities);
+    await _send(newContent, _copyImages(images), _copyFiles(files),
+        capabilities);
   }
+
+  static List<String>? _copyImages(List<String>? images) =>
+      images != null && images.isNotEmpty ? List.of(images) : null;
+
+  static List<Map<String, String>>? _copyFiles(
+          List<Map<String, String>>? files) =>
+      files != null && files.isNotEmpty
+          ? [for (final f in files) Map.of(f)]
+          : null;
 
   /// Notify + persist after the UI edits conversation settings in place
   /// (system prompt, context size, sampling parameters).
@@ -487,10 +734,8 @@ class ChatProvider extends ChangeNotifier with WidgetsBindingObserver {
   /// After the first successful exchange, ask the model itself for a short
   /// title. Fire-and-forget: failure or a meanwhile-renamed conversation
   /// just keeps the fallback title.
-  void _maybeGenerateTitle(
-      Conversation conv, ModelCapabilities? capabilities) {
-    final service = _service;
-    if (service == null) return;
+  void _maybeGenerateTitle(Conversation conv, OllamaService service,
+      String model, ModelCapabilities? capabilities) {
     final userMessages = conv.messages.where((m) => m.role == 'user');
     if (userMessages.length != 1) return;
     final firstUser = userMessages.first.content;
@@ -501,7 +746,9 @@ class ChatProvider extends ChangeNotifier with WidgetsBindingObserver {
       return;
     }
 
-    String clip(String s) => s.length > 500 ? s.substring(0, 500) : s;
+    // Grapheme-aware so a cut can't split an emoji
+    String clip(String s) =>
+        s.characters.length > 500 ? s.characters.take(500).toString() : s;
     final prompt = 'Write a short title (3-5 words) for this conversation. '
         'Reply with only the title — no quotes, no trailing punctuation.\n\n'
         'User: ${clip(firstUser)}\n\nAssistant: ${clip(reply.content)}';
@@ -515,7 +762,7 @@ class ChatProvider extends ChangeNotifier with WidgetsBindingObserver {
 
     // Guarded so a title failure can never disturb the send flow.
     try {
-      service.generateText(conv.model, prompt, think: think).then((raw) {
+      service.generateText(model, prompt, think: think).then((raw) {
         final title = _sanitizeTitle(raw);
         if (title.isEmpty) return;
         if (conv.title != autoTitleFor(firstUser)) return; // renamed meanwhile
@@ -534,12 +781,16 @@ class ChatProvider extends ChangeNotifier with WidgetsBindingObserver {
     t = t.replaceAll(RegExp(r"^['\x22#*\s]+"), '');
     t = t.replaceAll(RegExp(r"['\x22*.\s]+$"), '');
     t = t.replaceAll(RegExp(r'\s+'), ' ');
-    if (t.length > 60) t = '${t.substring(0, 60)}…';
+    if (t.characters.length > 60) t = '${t.characters.take(60)}…';
     return t;
   }
 
   Future<void> retryLastMessage({ModelCapabilities? capabilities}) async {
     if (_activeConversation == null) return;
+    // Guard BEFORE touching history: a rejected retry (disconnected, or
+    // another chat generating) must not delete the exchange it targets.
+    if (_service == null) return;
+    if (_streamingConversationId != null) return;
     final messages = _activeConversation!.messages;
     if (messages.length < 2) return;
 
@@ -563,39 +814,45 @@ class ChatProvider extends ChangeNotifier with WidgetsBindingObserver {
     messages.removeRange(lastUserIndex, messages.length);
     notifyListeners();
 
-    // Re-send with same images and files
-    if (images != null && images.isNotEmpty) {
-      _pendingImages
-        ..clear()
-        ..addAll(images);
-    }
-    if (files != null && files.isNotEmpty) {
-      final f = files.first;
-      _pendingFileName = f['name'];
-      _pendingFileBase64 = f['data'];
-      _pendingFileMimeType = f['type'];
-    }
-    await sendMessage(content, capabilities: capabilities);
+    // Re-send with the old message's own images and files
+    await _send(content, _copyImages(images), _copyFiles(files), capabilities);
   }
 
   void stopStreaming() {
-    // Distinguishes a user-initiated stop from a genuine stream error so
-    // the catch in sendMessage doesn't render the cancel as an error.
-    _cancelRequested = true;
-    _service?.cancelStream();
+    // Marks only the exchange in flight, so the catch in _send can tell a
+    // user-initiated stop from a genuine stream error — and a stale stop can
+    // never leak into a later exchange. The cancel also wakes a tool call
+    // that's waiting on a search, where there's no HTTP stream to abort.
+    final exchange = _currentExchange;
+    if (exchange == null) return;
+    exchange.cancel();
+    exchange.service.cancelStream();
+  }
+
+  /// Stops the exchange in flight and detaches it from the provider: it
+  /// winds down in the background, but its cleanup can no longer touch the
+  /// streaming state (or service) of anything started after it.
+  void _abandonExchange() {
+    stopStreaming();
+    _currentExchange = null;
+    _streamingConversationId = null;
+    _cancelPersistTimer();
   }
 
   void disconnectService() {
+    // Tear down an in-flight generation with the service — otherwise the
+    // orphaned stream keeps running against a conversation nobody shows.
+    _abandonExchange();
     _activeConversation = null;
-    _streamingConversationId = null;
     _service = null;
     notifyListeners();
   }
 
   void clear() {
+    _abandonExchange();
+    _dropPendingUndo();
     _conversations.clear();
     _activeConversation = null;
-    _streamingConversationId = null;
     _service = null;
     notifyListeners();
   }
@@ -603,8 +860,10 @@ class ChatProvider extends ChangeNotifier with WidgetsBindingObserver {
   /// Wipes every conversation and the files behind them (including the
   /// backup, so history can't reappear through the corruption fallback).
   Future<void> deleteAllConversations() async {
-    if (_streamingConversationId != null) stopStreaming();
+    stopStreaming();
     _cancelPersistTimer();
+    // "Delete all" is permanent — a pending undo must not bring one back.
+    _dropPendingUndo();
     _conversations.clear();
     _activeConversation = null;
     notifyListeners();
@@ -625,6 +884,7 @@ class ChatProvider extends ChangeNotifier with WidgetsBindingObserver {
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _cancelPersistTimer();
+    _undoTimer?.cancel();
     super.dispose();
   }
 
@@ -641,7 +901,14 @@ class ChatProvider extends ChangeNotifier with WidgetsBindingObserver {
   }
 
   Future<void> _persist() async {
-    await _storageService?.saveConversations(_conversations);
+    try {
+      await _storageService?.saveConversations(_conversations);
+    } catch (e) {
+      // Callers fire and forget, so a failed save (disk full, unwritable
+      // path) would otherwise be an unhandled async error — once per second
+      // while streaming. The next save simply tries again.
+      debugPrint('Failed to save conversations: $e');
+    }
   }
 
   void _cleanUpInterruptedMessages() {
@@ -655,4 +922,41 @@ class ChatProvider extends ChangeNotifier with WidgetsBindingObserver {
       }
     }
   }
+}
+
+/// One send and everything it kicks off (the stream legs and tool calls).
+class _Exchange {
+  _Exchange(this.service, this.userMessage);
+
+  /// Captured once: reconnecting mid-exchange must not swap the service
+  /// under a running tool loop.
+  final OllamaService service;
+  final ChatMessage userMessage;
+
+  /// Assistant and tool messages this exchange added to the chat, in order.
+  final List<ChatMessage> appended = [];
+
+  bool cancelled = false;
+  final Completer<void> _cancelSignal = Completer<void>();
+
+  /// Completes when the exchange is cancelled.
+  Future<void> get whenCancelled => _cancelSignal.future;
+
+  void cancel() {
+    cancelled = true;
+    if (!_cancelSignal.isCompleted) _cancelSignal.complete();
+  }
+
+  void throwIfCancelled() {
+    if (cancelled) throw const _ExchangeCancelled();
+  }
+}
+
+/// Thrown inside an exchange once it has been stopped; handled by the same
+/// recovery path as an aborted stream.
+class _ExchangeCancelled implements Exception {
+  const _ExchangeCancelled();
+
+  @override
+  String toString() => 'Cancelled';
 }

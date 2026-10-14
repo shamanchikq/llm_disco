@@ -67,5 +67,32 @@ void main() {
       expect(restored.messages[0].content, 'Hi');
       expect(restored.messages[1].thinking, 'I should greet back');
     });
+
+    test('fromJson tolerates ints stored in double fields', () {
+      // jsonDecode yields int for "1" but double for "1.0"; a strict
+      // `as double?` would throw and fail the whole file load.
+      final restored = Conversation.fromJson({
+        'id': 'int-coerce',
+        'model': 'llama3',
+        'title': 't',
+        'createdAt': '2024-07-01T12:00:00.000',
+        'messages': [],
+        'numCtx': 2048,
+        'lastContextTokens': 120,
+        'temperature': 1,
+        'topP': 1,
+        'topK': 40,
+        'repeatPenalty': 1,
+        'seed': 7,
+      });
+
+      expect(restored.numCtx, 2048);
+      expect(restored.lastContextTokens, 120);
+      expect(restored.temperature, 1.0);
+      expect(restored.topP, 1.0);
+      expect(restored.topK, 40);
+      expect(restored.repeatPenalty, 1.0);
+      expect(restored.seed, 7);
+    });
   });
 }

@@ -11,12 +11,14 @@ Built as my Final Year Project at Maynooth University (BSc Computer Science, 202
 - **Real-time streaming chat** - tokens appear as they are generated
 - **Model selection** - switch between any model installed on your Ollama server
 - **Image & file attachments** - send photos or files to vision-capable models
-- **Extended thinking mode** - see the model's reasoning process (Qwen, QwQ)
+- **Extended thinking mode** - see the model's reasoning process, with adjustable effort levels
 - **Web search** - models can search the web via a self-hosted SearXNG instance using tool-calling
 - **Model management** - browse, download, and delete models directly from the app
-- **Conversation persistence** - chats are saved locally on your device
-- **Multiple server profiles** - save and switch between different Ollama instances
-- **Dark theme** with syntax-highlighted code blocks
+- **Conversation management** - rename chats, edit & resend messages, export as Markdown or JSON
+- **Conversation persistence** - chats are saved locally with crash-safe writes and a backup fallback
+- **Multiple server profiles** - save and switch between Ollama instances; re-saving a name updates it
+- **Optional auth token** - for Ollama behind an API-key/Bearer proxy; never sent to third-party services
+- **Dark theme** with code blocks that carry a language label and copy button
 
 ## Requirements
 
@@ -61,7 +63,7 @@ test/            # Unit tests, widget tests, screen tests
 - **Flutter / Dart** - UI and app logic
 - **Provider** - state management
 - **http** - streaming HTTP for Ollama API
-- **flutter_markdown** - markdown rendering in chat
+- **flutter_markdown_plus** - markdown rendering in chat (maintained fork of `flutter_markdown`)
 - **image_picker / file_picker** - attachments
 - **path_provider** - local JSON storage
 

@@ -1,4 +1,3 @@
-import 'dart:async';
 import 'dart:math' as math;
 
 import 'package:file_picker/file_picker.dart';
@@ -15,6 +14,21 @@ import '../services/storage_service.dart';
 import '../theme/app_theme.dart';
 import 'model_selector.dart';
 
+/// Sidebar age bucket for a chat created at [createdAt]. Day counts come from
+/// UTC dates built out of each side's local calendar date: subtracting two
+/// local midnights across a clock change gives 23 or 25 hours, which
+/// `inDays` truncates to the wrong day.
+String conversationGroupFor(DateTime createdAt, DateTime now) {
+  final local = createdAt.toLocal();
+  final today = DateTime.utc(now.year, now.month, now.day);
+  final day = DateTime.utc(local.year, local.month, local.day);
+  final diff = today.difference(day).inDays;
+  if (diff <= 0) return 'Today';
+  if (diff == 1) return 'Yesterday';
+  if (diff <= 7) return 'Previous 7 days';
+  return 'Older';
+}
+
 class ChatSidebar extends StatefulWidget {
   const ChatSidebar({super.key});
 
@@ -27,12 +41,10 @@ class _ChatSidebarState extends State<ChatSidebar> {
   int _lastHash = 0;
   final _searchController = TextEditingController();
 
-  /// Last swipe-deleted conversation, held briefly for undo.
-  (Conversation, int)? _lastDeleted;
-  Timer? _undoTimer;
-
   int _computeHash(ChatProvider cp) => Object.hash(
     cp.activeConversation?.id,
+    // so the undo bar appears and expires without another list change
+    cp.undoableDeletes,
     Object.hashAll(cp.conversations.map((c) => Object.hash(
       c.id, c.title, c.messages.length,
     ))),
@@ -64,19 +76,15 @@ class _ChatSidebarState extends State<ChatSidebar> {
   void dispose() {
     _chatProvider?.removeListener(_onChanged);
     _searchController.dispose();
-    _undoTimer?.cancel();
     super.dispose();
   }
 
-  String _groupFor(DateTime createdAt) {
-    final now = DateTime.now();
-    final today = DateTime(now.year, now.month, now.day);
-    final day = DateTime(createdAt.year, createdAt.month, createdAt.day);
-    final diff = today.difference(day).inDays;
-    if (diff <= 0) return 'Today';
-    if (diff == 1) return 'Yesterday';
-    if (diff <= 7) return 'Previous 7 days';
-    return 'Older';
+  /// Dismisses the open options/backup sheet and the drawer behind it. The
+  /// result of what follows is reported in a snackbar, which the drawer would
+  /// otherwise paint over.
+  void _closeSheetAndDrawer(BuildContext sheetContext, BuildContext context) {
+    Navigator.pop(sheetContext);
+    Scaffold.maybeOf(context)?.closeDrawer();
   }
 
   @override
@@ -96,9 +104,12 @@ class _ChatSidebarState extends State<ChatSidebar> {
         c.title.toLowerCase().contains(query) ||
         c.messages.any((m) => m.content.toLowerCase().contains(query));
 
+    final now = DateTime.now();
     final grouped = <String, List<Conversation>>{};
     for (final c in chatProvider.conversations.where(matches)) {
-      grouped.putIfAbsent(_groupFor(c.createdAt), () => []).add(c);
+      grouped
+          .putIfAbsent(conversationGroupFor(c.createdAt, now), () => [])
+          .add(c);
     }
     const groupOrder = ['Today', 'Yesterday', 'Previous 7 days', 'Older'];
 
@@ -286,8 +297,10 @@ class _ChatSidebarState extends State<ChatSidebar> {
                       ],
                     ),
             ),
-            // Undo bar for a just-deleted conversation
-            if (_lastDeleted != null)
+            // Undo bar for just-deleted conversations. The pending deletes
+            // live in ChatProvider: this state is rebuilt each time the
+            // drawer opens, so holding them here lost the offer on close.
+            if (chatProvider.undoableDeletes > 0)
               Container(
                 decoration: BoxDecoration(
                   border: Border(top: BorderSide(color: tokens.line)),
@@ -298,20 +311,15 @@ class _ChatSidebarState extends State<ChatSidebar> {
                   children: [
                     Expanded(
                       child: Text(
-                        'Chat deleted',
+                        chatProvider.undoableDeletes == 1
+                            ? 'Chat deleted'
+                            : '${chatProvider.undoableDeletes} chats deleted',
                         style: TextStyle(
                             fontSize: 13, color: tokens.textMuted),
                       ),
                     ),
                     TextButton(
-                      onPressed: () {
-                        final removed = _lastDeleted;
-                        if (removed == null) return;
-                        _undoTimer?.cancel();
-                        _chatProvider!
-                            .restoreConversation(removed.$1, removed.$2);
-                        setState(() => _lastDeleted = null);
-                      },
+                      onPressed: chatProvider.undoDelete,
                       child: const Text('UNDO'),
                     ),
                   ],
@@ -385,15 +393,8 @@ class _ChatSidebarState extends State<ChatSidebar> {
           padding: const EdgeInsets.only(right: 20),
           child: Icon(Icons.delete_outline_rounded, color: colors.error),
         ),
-        onDismissed: (_) {
-          _undoTimer?.cancel();
-          final removed =
-              chatProvider.deleteConversationForUndo(conversation.id);
-          setState(() => _lastDeleted = removed);
-          _undoTimer = Timer(const Duration(seconds: 5), () {
-            if (mounted) setState(() => _lastDeleted = null);
-          });
-        },
+        onDismissed: (_) =>
+            chatProvider.deleteConversationWithUndo(conversation.id),
         child: Material(
           color: isActive ? colors.surfaceContainerHigh : Colors.transparent,
           borderRadius: BorderRadius.circular(10),
@@ -492,15 +493,9 @@ class _ChatSidebarState extends State<ChatSidebar> {
   }
 
   void _createNewConversation(BuildContext context) {
-    final modelProvider = context.read<ModelProvider>();
-    final connectionProvider = context.read<ConnectionProvider>();
-    final chatProvider = context.read<ChatProvider>();
-    final model = modelProvider.selectedModel ?? 'llama3';
-    chatProvider.createConversation(model);
-    if (connectionProvider.service != null) {
-      modelProvider.fetchCapabilities(connectionProvider.service!, model);
-    }
+    // Close the drawer first: a "no model" snackbar would paint under it.
     Navigator.pop(context);
+    startNewChat(context);
   }
 
   void _manageModels(BuildContext context) {
@@ -533,8 +528,8 @@ class _ChatSidebarState extends State<ChatSidebar> {
               title: const Text('Export all conversations'),
               subtitle: Text('${chatProvider.conversations.length} chats'),
               onTap: () async {
-                Navigator.pop(ctx);
                 final messenger = ScaffoldMessenger.of(context);
+                _closeSheetAndDrawer(ctx, context);
                 try {
                   final file = await storage
                       .exportAllConversations(chatProvider.conversations);
@@ -549,8 +544,8 @@ class _ChatSidebarState extends State<ChatSidebar> {
               leading: const Icon(Icons.download_outlined),
               title: const Text('Import from file'),
               onTap: () async {
-                Navigator.pop(ctx);
                 final messenger = ScaffoldMessenger.of(context);
+                _closeSheetAndDrawer(ctx, context);
                 try {
                   final result = await FilePicker.pickFiles(
                     type: FileType.custom,
@@ -614,7 +609,7 @@ class _ChatSidebarState extends State<ChatSidebar> {
   void _showConversationOptions(
     BuildContext context,
     ChatProvider chatProvider,
-    dynamic conversation,
+    Conversation conversation,
   ) {
     final storage = context.read<StorageService>();
     showModalBottomSheet(
@@ -635,8 +630,8 @@ class _ChatSidebarState extends State<ChatSidebar> {
               leading: const Icon(Icons.notes_outlined),
               title: const Text('Export as Markdown'),
               onTap: () async {
-                Navigator.pop(ctx);
                 final messenger = ScaffoldMessenger.of(context);
+                _closeSheetAndDrawer(ctx, context);
                 try {
                   final file =
                       await storage.exportConversationMarkdown(conversation);
@@ -651,8 +646,8 @@ class _ChatSidebarState extends State<ChatSidebar> {
               leading: const Icon(Icons.ios_share_outlined),
               title: const Text('Export as JSON'),
               onTap: () async {
-                Navigator.pop(ctx);
                 final messenger = ScaffoldMessenger.of(context);
+                _closeSheetAndDrawer(ctx, context);
                 try {
                   final file =
                       await storage.exportConversation(conversation);
@@ -672,7 +667,7 @@ class _ChatSidebarState extends State<ChatSidebar> {
   void _showRenameDialog(
     BuildContext context,
     ChatProvider chatProvider,
-    dynamic conversation,
+    Conversation conversation,
   ) {
     final controller = TextEditingController(text: conversation.title);
     showDialog(

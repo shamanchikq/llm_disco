@@ -216,3 +216,125 @@ against existing ids.
   the connection screen without auto-reconnecting).
 - [x] Error detection now uses a serialized `isError` flag on `ChatMessage`;
   error bubbles are also excluded from the history sent to the model.
+
+---
+
+## 6. Second audit pass
+
+Found by re-reading the whole codebase against the docs. All fixed, with
+test coverage added alongside.
+
+### Keyboard send silently dropped the message while another chat generated
+`lib/widgets/chat_input.dart` → `_send()`
+
+The send button is dimmed for `busyElsewhere`, but the keyboard's send
+action bypassed it: `_send()` checked only `isStreaming` (this chat), then
+cleared the field — and `sendMessage()` refused the send on its
+one-generation-at-a-time guard. Text gone without feedback.
+
+**Fix:** `_send()` bails on `isAnyStreaming` *before* clearing the field.
+
+- [x] Fixed
+
+### Cancelling a model pull showed "Pull failed"
+`lib/providers/model_provider.dart`
+
+`cancelPull()` closes the HTTP client, so the in-flight stream throws — and
+`pullModel()`'s catch wrote that exception into `_pullError` *after* the
+cancel had already reset state. A deliberate cancel rendered as a failed
+download in the sheet and the Discover tab banner.
+
+**Fix:** a `_pullCancelRequested` flag (same pattern as the chat stream's
+cancel) makes the catch recognize the abort and stay quiet.
+
+- [x] Fixed
+
+### A failure mid-tool-loop left malformed history behind
+`lib/providers/chat_provider.dart` → `sendMessage()`
+
+When the post-web_search stream died, the error landed on the newest empty
+assistant bubble — which is filtered out of resent history — while tool
+results from earlier iterations survived it. The next request could carry
+tool results whose parent bubble was gone (BACKLOG §1.3's malformation,
+reintroduced through the error path).
+
+**Fix:** every exchange records a history mark after appending its user
+message; on failure the tail rolls back to that mark and is rebuilt —
+partial content kept as interrupted, thinking-only stops kept as
+"[Stopped]", genuine failures get one clean error bubble. Preserved
+partials drop their tool calls along with their discarded results.
+
+- [x] Fixed
+
+### Retrying or editing the opening message downgraded its title
+`lib/providers/chat_provider.dart`
+
+Auto-titling fired whenever the conversation was back to a single user
+message — so retrying or editing an opener overwrote the model-generated
+title with the truncated fallback.
+
+**Fix:** the fallback title is only ever written while the title is still
+the untouched "New Chat" default; editing an opener moves a *fallback*
+title in step with the edit, and retries/edits never touch generated or
+manual titles.
+
+- [x] Fixed
+
+### Destructive helpers mutated history before their guards ran
+`lib/providers/chat_provider.dart`
+
+`retryLastMessage()` / `editAndResend()` truncated the conversation first
+and called `sendMessage()` second — whose early returns (no service,
+another chat generating) left the truncation unreverted. Relatedly,
+`disconnectService()` / `clear()` dropped the service without stopping an
+in-flight stream, leaving an orphaned generation running against a
+detached conversation.
+
+**Fix:** both helpers refuse disconnected/busy states before touching
+history; disconnect/clear call `stopStreaming()` first.
+
+- [x] Fixed
+
+### One int in stored JSON could fail the entire history load
+`lib/models/conversation.dart` → `fromJson()`
+
+`json['temperature'] as double?` throws when jsonDecode yields an int
+(`"temperature": 1`) — one bad field made `loadConversations()` fall back
+to the `.bak`, and killed imports outright.
+
+**Fix:** all numeric fields coerce through `num?` (`?.toDouble()` /
+`?.toInt()`), so ints degrade instead of throwing.
+
+- [x] Fixed
+
+### Connection input accepted junk, auth failures looked like dead servers
+`lib/providers/connection_provider.dart`, `lib/services/ollama_service.dart`
+
+No port validation (empty or non-numeric ports built malformed URLs that
+failed downstream with generic errors), bare IPv6 literals broke URL
+construction, and a wrong API token surfaced as "Could not connect" —
+indistinguishable from a typo'd IP.
+
+**Fix:** provider validates ip/port up front (ports 1–65535) and brackets
+IPv6; `OllamaService.testConnectionStatus()` exposes the raw HTTP status so
+401/403 report as authentication failures, unreachable as unreachable.
+Service creation is injectable for tests.
+
+- [x] Fixed
+
+### Smaller loose ends
+- [x] `deleteModel()` leaked an unclosed `http.Client` per call — now closed
+  in a `finally`.
+- [x] Think/Search chip toggles mutated the conversation without persisting;
+  they now go through `conversationSettingsChanged()` like every other
+  setting.
+- [x] Saving a connection profile with an existing name replaces it instead
+  of piling up duplicates.
+- [x] The launcher icon source moved from the git-excluded `FYP/` snapshot to
+  `assets/app_icon.png` (a fresh clone couldn't regenerate icons).
+- [x] Whole-repo CRLF churn fixed at the source: working tree restored to LF
+  and `.gitattributes` now forces LF for all text files.
+- [x] Branding/doc drift cleaned up: `MaterialApp.title` says "LLM Disco"
+  (was "LLM Chat"), pubspec description filled in, theme comment corrected,
+  README no longer claims syntax-highlighted code blocks or the
+  discontinued `flutter_markdown`.

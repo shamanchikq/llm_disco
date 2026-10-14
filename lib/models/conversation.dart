@@ -85,13 +85,15 @@ class Conversation {
       thinkingLevel: json['thinkingLevel'] as String?,
       webSearchEnabled: json['webSearchEnabled'] as bool? ?? false,
       systemPrompt: json['systemPrompt'] as String?,
-      numCtx: json['numCtx'] as int?,
-      lastContextTokens: json['lastContextTokens'] as int?,
-      temperature: json['temperature'] as double?,
-      topK: json['topK'] as int?,
-      topP: json['topP'] as double?,
-      repeatPenalty: json['repeatPenalty'] as double?,
-      seed: json['seed'] as int?,
+      // num?-based: an int in stored/imported JSON (e.g. "temperature": 1)
+      // must degrade to a double, not throw and fail the whole file.
+      numCtx: (json['numCtx'] as num?)?.toInt(),
+      lastContextTokens: (json['lastContextTokens'] as num?)?.toInt(),
+      temperature: (json['temperature'] as num?)?.toDouble(),
+      topK: (json['topK'] as num?)?.toInt(),
+      topP: (json['topP'] as num?)?.toDouble(),
+      repeatPenalty: (json['repeatPenalty'] as num?)?.toDouble(),
+      seed: (json['seed'] as num?)?.toInt(),
     );
   }
 }

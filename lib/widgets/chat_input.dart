@@ -1,17 +1,49 @@
 import 'dart:convert';
-import 'dart:io';
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:provider/provider.dart';
+import '../models/conversation.dart';
 import '../providers/chat_provider.dart';
 import '../providers/model_provider.dart';
 import '../theme/app_theme.dart';
 
+/// Runs a platform picker call, turning a failure (no camera, permission
+/// denied, unreadable file) into a snackbar instead of an unhandled async
+/// error. Returns null on failure.
+Future<T?> guardPicker<T>(
+  ScaffoldMessengerState messenger,
+  String failureMessage,
+  Future<T> Function() pick,
+) async {
+  try {
+    return await pick();
+  } on Exception {
+    messenger
+      ..clearSnackBars()
+      ..showSnackBar(SnackBar(content: Text(failureMessage)));
+    return null;
+  }
+}
+
+enum PickedFileStatus { cancelled, unreadable, ok }
+
+/// Tells a cancelled file picker (silent) apart from a chosen file whose
+/// bytes could not be read (worth telling the user about).
+PickedFileStatus classifyPickedFile(FilePickerResult? result) {
+  if (result == null || result.files.isEmpty) return PickedFileStatus.cancelled;
+  return result.files.first.bytes == null
+      ? PickedFileStatus.unreadable
+      : PickedFileStatus.ok;
+}
+
 class ChatInput extends StatefulWidget {
-  const ChatInput({super.key});
+  /// Overrides the image picker (tests); defaults to the platform one.
+  final ImagePicker? imagePicker;
+
+  const ChatInput({super.key, this.imagePicker});
 
   @override
   State<ChatInput> createState() => _ChatInputState();
@@ -20,7 +52,7 @@ class ChatInput extends StatefulWidget {
 class _ChatInputState extends State<ChatInput> {
   final _controller = TextEditingController();
   final _focusNode = FocusNode();
-  final _picker = ImagePicker();
+  late final ImagePicker _picker = widget.imagePicker ?? ImagePicker();
 
   @override
   void initState() {
@@ -206,9 +238,12 @@ class _ChatInputState extends State<ChatInput> {
                               if (levelsOnly) {
                                 _cycleThinkingLevel(conversation, levelsOnly);
                               } else {
-                                setState(() {
-                                  conversation.thinkingEnabled = !thinkingOn;
-                                });
+                                conversation.thinkingEnabled = !thinkingOn;
+                                // Persisted like every other conversation
+                                // setting, not just until the next rebuild.
+                                context
+                                    .read<ChatProvider>()
+                                    .conversationSettingsChanged();
                               }
                             },
                             onLevelTap: () => _cycleThinkingLevel(
@@ -221,10 +256,11 @@ class _ChatInputState extends State<ChatInput> {
                             active: conversation.webSearchEnabled,
                             onTap: () {
                               HapticFeedback.selectionClick();
-                              setState(() {
-                                conversation.webSearchEnabled =
-                                    !conversation.webSearchEnabled;
-                              });
+                              conversation.webSearchEnabled =
+                                  !conversation.webSearchEnabled;
+                              context
+                                  .read<ChatProvider>()
+                                  .conversationSettingsChanged();
                             },
                           ),
                       ],
@@ -265,7 +301,13 @@ class _ChatInputState extends State<ChatInput> {
                         style: const TextStyle(fontSize: 15, height: 1.4),
                         decoration: InputDecoration(
                           hintText: 'Message ${conversation.model}…',
-                          hintStyle: TextStyle(color: tokens.textFaint),
+                          // A long model name must not wrap the empty field
+                          // to several lines.
+                          hintMaxLines: 1,
+                          hintStyle: TextStyle(
+                            color: tokens.textFaint,
+                            overflow: TextOverflow.ellipsis,
+                          ),
                           filled: false,
                           border: InputBorder.none,
                           enabledBorder: InputBorder.none,
@@ -321,7 +363,7 @@ class _ChatInputState extends State<ChatInput> {
     );
   }
 
-  void _cycleThinkingLevel(dynamic conversation, bool levelsOnly) {
+  void _cycleThinkingLevel(Conversation conversation, bool levelsOnly) {
     if (levelsOnly) {
       // gpt-oss effort levels
       const order = ['low', 'medium', 'high'];
@@ -331,10 +373,11 @@ class _ChatInputState extends State<ChatInput> {
     } else {
       // auto (server default) → explicit effort levels → back to auto
       const order = <String?>[null, 'low', 'medium', 'high', 'max'];
-      final idx = order.indexOf(conversation.thinkingLevel as String?);
+      final idx = order.indexOf(conversation.thinkingLevel);
       conversation.thinkingLevel = order[(idx + 1) % order.length];
     }
-    setState(() {});
+    // Persisted like every other conversation setting.
+    context.read<ChatProvider>().conversationSettingsChanged();
   }
 
   Future<void> _pickImage() async {
@@ -360,26 +403,43 @@ class _ChatInputState extends State<ChatInput> {
     );
     if (source == null || !mounted) return;
     final chatProvider = context.read<ChatProvider>();
+    final messenger = ScaffoldMessenger.of(context);
 
     if (source == 'camera') {
-      final file = await _picker.pickImage(
-        source: ImageSource.camera,
-        maxWidth: 1024,
-        maxHeight: 1024,
-        imageQuality: 85,
+      final encoded = await guardPicker<String?>(
+        messenger,
+        "Couldn't open the camera. Check that this device has one and that "
+        'the app is allowed to use it.',
+        () async {
+          final file = await _picker.pickImage(
+            source: ImageSource.camera,
+            maxWidth: 1024,
+            maxHeight: 1024,
+            imageQuality: 85,
+          );
+          if (file == null) return null; // cancelled
+          return base64Encode(await file.readAsBytes());
+        },
       );
-      if (file == null) return;
-      chatProvider.addPendingImage(
-          base64Encode(await File(file.path).readAsBytes()));
+      if (encoded != null) chatProvider.addPendingImage(encoded);
     } else {
-      final files = await _picker.pickMultiImage(
-        maxWidth: 1024,
-        maxHeight: 1024,
-        imageQuality: 85,
+      final encoded = await guardPicker<List<String>>(
+        messenger,
+        "Couldn't open the photo library. Check the app's photo permission "
+        'and try again.',
+        () async {
+          final files = await _picker.pickMultiImage(
+            maxWidth: 1024,
+            maxHeight: 1024,
+            imageQuality: 85,
+          );
+          return [
+            for (final file in files) base64Encode(await file.readAsBytes()),
+          ];
+        },
       );
-      for (final file in files) {
-        chatProvider.addPendingImage(
-            base64Encode(await File(file.path).readAsBytes()));
+      for (final image in encoded ?? const <String>[]) {
+        chatProvider.addPendingImage(image);
       }
     }
   }
@@ -390,9 +450,25 @@ class _ChatInputState extends State<ChatInput> {
     final messenger = ScaffoldMessenger.of(context);
     final conversation = chatProvider.activeConversation;
 
-    final result = await FilePicker.pickFiles(withData: true);
-    if (result == null || result.files.single.bytes == null) return;
-    final f = result.files.single;
+    final result = await guardPicker<FilePickerResult?>(
+      messenger,
+      "Couldn't open the file picker.",
+      () => FilePicker.pickFiles(withData: true),
+    );
+    switch (classifyPickedFile(result)) {
+      case PickedFileStatus.cancelled:
+        return;
+      case PickedFileStatus.unreadable:
+        messenger
+          ..clearSnackBars()
+          ..showSnackBar(const SnackBar(
+            content: Text("Couldn't read that file"),
+          ));
+        return;
+      case PickedFileStatus.ok:
+        break;
+    }
+    final f = result!.files.first;
 
     if (_isImageExtension(f.extension)) {
       // Images go through Ollama's images field — vision models only.
@@ -473,11 +549,33 @@ class _ChatInputState extends State<ChatInput> {
 
   void _send(ChatProvider chatProvider) {
     final text = _controller.text.trim();
-    if (text.isEmpty || chatProvider.isStreaming) return;
+    if (text.isEmpty) return;
+    // The keyboard's send action reaches here even while the send button
+    // is dimmed for a generation in another chat. Bailing out BEFORE
+    // clearing the field keeps the text; sendMessage would silently drop
+    // it otherwise (one stream at a time, by design).
+    if (chatProvider.isAnyStreaming) return;
     final conversation = chatProvider.activeConversation;
     final caps = conversation != null
         ? context.read<ModelProvider>().getCapabilities(conversation.model)
         : null;
+    // Attachments outlive a mid-chat model switch, but the attach button
+    // doesn't — don't ship images to a model that can't read them. Unknown
+    // capabilities (fetch pending) don't block.
+    final pendingFile = chatProvider.pendingFileName;
+    final hasPendingImage = chatProvider.pendingImages.isNotEmpty ||
+        (pendingFile != null &&
+            pendingFile.contains('.') &&
+            _isImageExtension(pendingFile.split('.').last));
+    if (hasPendingImage && caps != null && !caps.supportsVision) {
+      ScaffoldMessenger.of(context)
+        ..clearSnackBars()
+        ..showSnackBar(const SnackBar(
+          content: Text("The current model can't read images. Remove the "
+              'attached image or switch to a vision model.'),
+        ));
+      return;
+    }
     HapticFeedback.lightImpact();
     _controller.clear();
     chatProvider.sendMessage(text, capabilities: caps);
@@ -496,30 +594,59 @@ class _ThumbImage extends StatefulWidget {
 }
 
 class _ThumbImageState extends State<_ThumbImage> {
-  late Uint8List _bytes;
+  // Null when the stored data isn't valid base64 — shown as a broken-image
+  // icon rather than throwing from initState.
+  Uint8List? _bytes;
 
   @override
   void initState() {
     super.initState();
-    _bytes = base64Decode(widget.base64Data);
+    _bytes = _decode(widget.base64Data);
   }
 
   @override
   void didUpdateWidget(_ThumbImage oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.base64Data != widget.base64Data) {
-      _bytes = base64Decode(widget.base64Data);
+      _bytes = _decode(widget.base64Data);
+    }
+  }
+
+  static Uint8List? _decode(String data) {
+    try {
+      return base64Decode(data);
+    } on FormatException {
+      return null;
     }
   }
 
   @override
   Widget build(BuildContext context) {
+    final bytes = _bytes;
+    if (bytes == null) return _BrokenThumb(size: widget.size);
     return Image.memory(
-      _bytes,
+      bytes,
       width: widget.size,
       height: widget.size,
       fit: BoxFit.cover,
       gaplessPlayback: true,
+      errorBuilder: (_, _, _) => _BrokenThumb(size: widget.size),
+    );
+  }
+}
+
+class _BrokenThumb extends StatelessWidget {
+  final double size;
+
+  const _BrokenThumb({required this.size});
+
+  @override
+  Widget build(BuildContext context) {
+    final tokens = Theme.of(context).extension<DiscoTokens>()!;
+    return SizedBox(
+      width: size,
+      height: size,
+      child: Icon(Icons.broken_image_outlined, color: tokens.textFaint),
     );
   }
 }

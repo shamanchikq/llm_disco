@@ -5,6 +5,7 @@ import 'package:mocktail/mocktail.dart';
 import 'package:llm_disco_test1/models/chat_message.dart';
 import 'package:llm_disco_test1/providers/chat_provider.dart';
 import 'package:llm_disco_test1/models/conversation.dart';
+import 'package:llm_disco_test1/models/model_capabilities.dart';
 import 'package:llm_disco_test1/services/ollama_service.dart';
 import '../helpers/mocks.dart';
 
@@ -662,6 +663,68 @@ void main() {
       expect(provider.conversations.map((c) => c.id), contains(a.id));
     });
 
+    group('undo for deleted conversations', () {
+      test('a second delete keeps the first one restorable, in order', () {
+        final a = provider.createConversation('llama3');
+        final b = provider.createConversation('phi3');
+        final c = provider.createConversation('qwen3');
+        final original = provider.conversations.map((x) => x.id).toList();
+
+        provider.deleteConversationWithUndo(a.id);
+        provider.deleteConversationWithUndo(c.id);
+        expect(provider.undoableDeletes, 2);
+        expect(provider.conversations.map((x) => x.id), [b.id]);
+
+        provider.undoDelete();
+
+        expect(provider.undoableDeletes, 0);
+        expect(provider.conversations.map((x) => x.id), original);
+      });
+
+      // testWidgets for its fake clock: pump() advances the undo timer.
+      testWidgets('the offer expires after the undo window', (tester) async {
+        final a = provider.createConversation('llama3');
+        provider.deleteConversationWithUndo(a.id);
+
+        await tester
+            .pump(ChatProvider.undoWindow - const Duration(seconds: 1));
+        expect(provider.undoableDeletes, 1);
+
+        await tester.pump(const Duration(seconds: 1));
+        expect(provider.undoableDeletes, 0);
+        provider.undoDelete();
+        expect(provider.conversations, isEmpty);
+      });
+
+      testWidgets('a further delete restarts the window for the whole batch',
+          (tester) async {
+        final a = provider.createConversation('llama3');
+        final b = provider.createConversation('phi3');
+        provider.deleteConversationWithUndo(a.id);
+        await tester.pump(const Duration(seconds: 4));
+        provider.deleteConversationWithUndo(b.id);
+        await tester.pump(const Duration(seconds: 4));
+
+        // 8 s after the first delete, but only 4 s after the second
+        expect(provider.undoableDeletes, 2);
+
+        await tester.pump(const Duration(seconds: 1));
+        expect(provider.undoableDeletes, 0);
+      });
+
+      test('delete all leaves nothing to undo', () async {
+        final a = provider.createConversation('llama3');
+        provider.createConversation('phi3');
+        provider.deleteConversationWithUndo(a.id);
+
+        await provider.deleteAllConversations();
+        provider.undoDelete();
+
+        expect(provider.undoableDeletes, 0);
+        expect(provider.conversations, isEmpty);
+      });
+    });
+
     test('multiple pending images attach to the sent message', () async {
       final mock = MockOllamaService();
       provider.setService(mock);
@@ -716,5 +779,900 @@ void main() {
       await provider.sendMessage('line one\nline two of a much longer text');
       expect(newline.title.contains('\n'), isFalse);
     });
+
+    test('a failure mid-tool-loop rolls back dangling tool results',
+        () async {
+      final mock = MockOllamaService();
+      provider.setService(mock);
+      provider.setSearxngUrl('http://searx.local');
+      final conv = provider.createConversation('qwen3');
+      conv.webSearchEnabled = true;
+
+      var call = 0;
+      when(() => mock.streamChat(
+            any(),
+            any(),
+            think: any(named: 'think'),
+            tools: any(named: 'tools'),
+            numCtx: any(named: 'numCtx'),
+          )).thenAnswer((_) {
+        call++;
+        if (call == 1) {
+          // First leg succeeds and asks for a web search…
+          return Stream.fromIterable([
+            ChatStreamEvent(
+              toolCalls: [
+                {
+                  'function': {
+                    'name': 'web_search',
+                    'arguments': {'query': 'dart'},
+                  },
+                },
+              ],
+              done: true,
+            ),
+          ]);
+        }
+        // …the follow-up stream dies.
+        return Stream.error(Exception('server died'));
+      });
+      when(() => mock.searchSearXNG(any(), any())).thenAnswer((_) async => [
+            {'title': 't', 'url': 'u', 'content': 'c'},
+          ]);
+
+      await provider.sendMessage('search something');
+
+      // Exactly one clean pair may survive: no orphaned tool results whose
+      // parent bubble became an error and gets filtered out on resend.
+      expect(conv.messages.map((m) => m.role), ['user', 'assistant']);
+      expect(conv.messages.last.isError, isTrue);
+      expect(conv.messages.last.toolCalls, isNull);
+    });
+
+    group('titles survive retrying and editing the opener', () {
+      late MockOllamaService mock;
+
+      setUp(() {
+        mock = MockOllamaService();
+        provider.setService(mock);
+        when(() => mock.streamChat(
+              any(),
+              any(),
+              think: any(named: 'think'),
+              tools: any(named: 'tools'),
+              numCtx: any(named: 'numCtx'),
+            )).thenAnswer((_) => Stream.fromIterable(
+            [const ChatStreamEvent(contentToken: 'ok', done: true)]));
+      });
+
+      test('retrying the opener keeps a generated title', () async {
+        when(() => mock.generateText(any(), any(), think: any(named: 'think')))
+            .thenAnswer((_) async => 'Generated Title');
+        final conv = provider.createConversation('llama3');
+
+        await provider.sendMessage('Tell me about Paris');
+        await pumpEventQueue();
+        expect(conv.title, 'Generated Title');
+
+        await provider.retryLastMessage();
+        await pumpEventQueue();
+
+        // A retry must not downgrade the generated title to the fallback,
+        // nor ask the model for another one.
+        expect(conv.title, 'Generated Title');
+        verify(() => mock.generateText(any(), any(),
+            think: any(named: 'think'))).called(1);
+      });
+
+      test('editing the opener moves a fallback title in step', () async {
+        when(() => mock.generateText(any(), any(), think: any(named: 'think')))
+            .thenAnswer((_) async => '');
+        final conv = provider.createConversation('llama3');
+
+        await provider.sendMessage('first question');
+        expect(conv.title, 'first question');
+
+        await provider.editAndResend(conv.messages.first, 'edited question');
+
+        expect(conv.title, 'edited question');
+      });
+
+      test('editing the opener never downgrades a generated title',
+          () async {
+        when(() => mock.generateText(any(), any(), think: any(named: 'think')))
+            .thenAnswer((_) async => 'Generated Title');
+        final conv = provider.createConversation('llama3');
+
+        await provider.sendMessage('Tell me about Paris');
+        await pumpEventQueue();
+        expect(conv.title, 'Generated Title');
+
+        await provider.editAndResend(conv.messages.first, 'Edited opener');
+        await pumpEventQueue();
+
+        expect(conv.title, 'Generated Title');
+      });
+    });
+
+    test('retry/edit refuse to touch history while another chat generates',
+        () async {
+      final mock = MockOllamaService();
+      final controller = StreamController<ChatStreamEvent>();
+      provider.setService(mock);
+      when(() => mock.streamChat(
+            any(),
+            any(),
+            think: any(named: 'think'),
+            tools: any(named: 'tools'),
+            numCtx: any(named: 'numCtx'),
+          )).thenAnswer((_) => controller.stream);
+
+      final a = provider.createConversation('llama3');
+      final b = provider.createConversation('phi3');
+      b.messages.addAll([
+        ChatMessage(role: 'user', content: 'b q'),
+        ChatMessage(role: 'assistant', content: 'b a'),
+      ]);
+      provider.setActiveConversation(a);
+
+      final send = provider.sendMessage('hi');
+      await Future<void>.delayed(Duration.zero);
+      provider.setActiveConversation(b);
+
+      // Both destructive paths must bail out BEFORE mutating history —
+      // otherwise a refused retry would still delete the exchange.
+      await provider.retryLastMessage();
+      await provider.editAndResend(b.messages.first, 'rewritten');
+
+      expect(b.messages.map((m) => m.content), ['b q', 'b a']);
+
+      controller.add(const ChatStreamEvent(contentToken: 'done', done: true));
+      await controller.close();
+      await send;
+    });
+
+    test('retry/edit refuse while disconnected', () async {
+      final conv = provider.createConversation('llama3');
+      conv.messages.addAll([
+        ChatMessage(role: 'user', content: 'q'),
+        ChatMessage(role: 'assistant', content: 'a'),
+      ]);
+      // No service set — both calls must be no-ops.
+
+      await provider.retryLastMessage();
+      await provider.editAndResend(conv.messages.first, 'x');
+
+      expect(conv.messages.length, 2);
+      expect(conv.messages.first.content, 'q');
+      expect(conv.messages.last.content, 'a');
+    });
+
+    group('web search tool loop', () {
+      late MockOllamaService mock;
+      late Conversation conv;
+
+      setUp(() {
+        mock = MockOllamaService();
+        provider.setService(mock);
+        provider.setSearxngUrl('http://searx.local');
+        conv = provider.createConversation('qwen3');
+        conv.webSearchEnabled = true;
+        when(() => mock.cancelStream()).thenAnswer((_) {});
+        when(() => mock.generateText(any(), any(), think: any(named: 'think')))
+            .thenAnswer((_) async => '');
+      });
+
+      /// Stubs `streamChat`; [answer] gets the 1-based leg number and the
+      /// invocation (positional 0 = model, 1 = messages, named #tools).
+      void stubLegs(Stream<ChatStreamEvent> Function(int leg, Invocation inv) answer) {
+        var leg = 0;
+        when(() => mock.streamChat(
+              any(),
+              any(),
+              think: any(named: 'think'),
+              tools: any(named: 'tools'),
+              numCtx: any(named: 'numCtx'),
+            )).thenAnswer((inv) => answer(++leg, inv));
+      }
+
+      void verifyLegs(int times) {
+        verify(() => mock.streamChat(
+              any(),
+              any(),
+              think: any(named: 'think'),
+              tools: any(named: 'tools'),
+              numCtx: any(named: 'numCtx'),
+            )).called(times);
+      }
+
+      Stream<ChatStreamEvent> toolCallLeg(Object? query) =>
+          Stream.fromIterable(
+              [ChatStreamEvent(toolCalls: [searchCall(query)], done: true)]);
+
+      Stream<ChatStreamEvent> answerLeg([String text = 'answer']) =>
+          Stream.fromIterable(
+              [ChatStreamEvent(contentToken: text, done: true)]);
+
+      const oneResult = [
+        {'title': 't', 'url': 'u', 'content': 'c'},
+      ];
+
+      group('stopping', () {
+        test('stop during a pending search ends the exchange quietly',
+            () async {
+          final search = Completer<List<Map<String, dynamic>>>();
+          stubLegs((_, _) => toolCallLeg('dart'));
+          when(() => mock.searchSearXNG(any(), any()))
+              .thenAnswer((_) => search.future);
+
+          final send = provider.sendMessage('question');
+          await pumpEventQueue();
+          verify(() => mock.searchSearXNG(any(), 'dart')).called(1);
+          provider.stopStreaming();
+          search.complete([...oneResult]);
+          await send;
+          await pumpEventQueue();
+
+          // no second leg, no error bubble, nothing half-finished left behind
+          verifyLegs(1);
+          expect(conv.messages.map((m) => m.role), ['user']);
+          expect(provider.isAnyStreaming, isFalse);
+          expect(provider.isStreaming, isFalse);
+        });
+
+        test('stop returns without waiting for a slow search', () async {
+          final search = Completer<List<Map<String, dynamic>>>();
+          stubLegs((_, _) => toolCallLeg('dart'));
+          when(() => mock.searchSearXNG(any(), any()))
+              .thenAnswer((_) => search.future);
+
+          final send = provider.sendMessage('question');
+          await pumpEventQueue();
+          provider.stopStreaming();
+          await send; // would hang until the search finished before the fix
+
+          expect(provider.isAnyStreaming, isFalse);
+          // the late result is discarded, not acted on
+          search.complete([...oneResult]);
+          await pumpEventQueue();
+          verifyLegs(1);
+          expect(conv.messages.map((m) => m.role), ['user']);
+        });
+
+        test('stop after the tool-call leg finished starts no search',
+            () async {
+          final controller = StreamController<ChatStreamEvent>();
+          stubLegs((_, _) => controller.stream);
+
+          final send = provider.sendMessage('question');
+          await pumpEventQueue();
+          controller.add(ChatStreamEvent(toolCalls: [searchCall('dart')]));
+          await pumpEventQueue();
+          // The stream was not torn down (the mock's cancel is a no-op), so
+          // the leg ends normally — but the stop must still win.
+          provider.stopStreaming();
+          await controller.close();
+          await send;
+
+          verifyNever(() => mock.searchSearXNG(any(), any()));
+          verifyLegs(1);
+          expect(conv.messages.map((m) => m.role), ['user']);
+        });
+
+        test('a stop keeps the partial text of the interrupted leg',
+            () async {
+          final controller = StreamController<ChatStreamEvent>();
+          stubLegs((_, _) => controller.stream);
+
+          final send = provider.sendMessage('question');
+          await pumpEventQueue();
+          controller.add(ChatStreamEvent(
+              contentToken: 'Let me look', toolCalls: [searchCall('dart')]));
+          await pumpEventQueue();
+          provider.stopStreaming();
+          await controller.close();
+          await send;
+
+          expect(conv.messages.map((m) => m.role), ['user', 'assistant']);
+          expect(conv.messages.last.content,
+              'Let me look\n\n*[Response interrupted]*');
+          expect(conv.messages.last.toolCalls, isNull);
+          expect(conv.messages.last.isError, isFalse);
+        });
+
+        test('a stop does not make the next exchange\'s failure look like one',
+            () async {
+          final search = Completer<List<Map<String, dynamic>>>();
+          stubLegs((leg, _) {
+            if (leg == 1) return toolCallLeg('dart');
+            return Stream.error(Exception('server died'));
+          });
+          when(() => mock.searchSearXNG(any(), any()))
+              .thenAnswer((_) => search.future);
+
+          final first = provider.sendMessage('one');
+          await pumpEventQueue();
+          provider.stopStreaming();
+          search.complete([...oneResult]);
+          await first;
+
+          await provider.sendMessage('two');
+
+          // the stale stop flag used to swallow this error
+          expect(conv.messages.last.isError, isTrue);
+          expect(conv.messages.last.content, contains('server died'));
+        });
+
+        test('an error in a later leg still produces an error bubble',
+            () async {
+          stubLegs((leg, _) => leg == 1
+              ? toolCallLeg('dart')
+              : Stream.error(Exception('server died')));
+          when(() => mock.searchSearXNG(any(), any()))
+              .thenAnswer((_) async => [...oneResult]);
+
+          await provider.sendMessage('question');
+
+          expect(conv.messages.map((m) => m.role), ['user', 'assistant']);
+          expect(conv.messages.last.isError, isTrue);
+        });
+
+        test('an exchange orphaned by disconnect never touches the next one',
+            () async {
+          final search = Completer<List<Map<String, dynamic>>>();
+          stubLegs((_, _) => toolCallLeg('dart'));
+          when(() => mock.searchSearXNG(any(), any()))
+              .thenAnswer((_) => search.future);
+
+          final orphan = provider.sendMessage('first');
+          await pumpEventQueue();
+          provider.disconnectService();
+
+          // quick reconnect to a fresh service, then a new send
+          final mock2 = MockOllamaService();
+          final controller = StreamController<ChatStreamEvent>();
+          when(() => mock2.streamChat(
+                any(),
+                any(),
+                think: any(named: 'think'),
+                tools: any(named: 'tools'),
+                numCtx: any(named: 'numCtx'),
+              )).thenAnswer((_) => controller.stream);
+          when(() => mock2.generateText(any(), any(),
+              think: any(named: 'think'))).thenAnswer((_) async => '');
+          provider.setService(mock2);
+          final other = provider.createConversation('phi3');
+          final next = provider.sendMessage('second');
+          await pumpEventQueue();
+
+          // the orphan winds down in the background…
+          search.complete([...oneResult]);
+          await orphan;
+          await pumpEventQueue();
+
+          // …without clearing the new exchange's streaming state…
+          expect(provider.isAnyStreaming, isTrue);
+          expect(provider.isStreaming, isTrue);
+          // …or starting another leg on either service
+          verifyLegs(1);
+          verify(() => mock2.streamChat(
+                any(),
+                any(),
+                think: any(named: 'think'),
+                tools: any(named: 'tools'),
+                numCtx: any(named: 'numCtx'),
+              )).called(1);
+
+          controller.add(const ChatStreamEvent(contentToken: 'ok', done: true));
+          await controller.close();
+          await next;
+          expect(other.messages.map((m) => m.content), ['second', 'ok']);
+          expect(provider.isAnyStreaming, isFalse);
+        });
+
+        test('an orphan on the same chat leaves the later exchange\'s messages',
+            () async {
+          final search = Completer<List<Map<String, dynamic>>>();
+          stubLegs((_, _) => toolCallLeg('dart'));
+          when(() => mock.searchSearXNG(any(), any()))
+              .thenAnswer((_) => search.future);
+
+          final orphan = provider.sendMessage('first');
+          await pumpEventQueue();
+          provider.disconnectService();
+
+          final mock2 = MockOllamaService();
+          final controller = StreamController<ChatStreamEvent>();
+          when(() => mock2.streamChat(
+                any(),
+                any(),
+                think: any(named: 'think'),
+                tools: any(named: 'tools'),
+                numCtx: any(named: 'numCtx'),
+              )).thenAnswer((_) => controller.stream);
+          provider.setService(mock2);
+          provider.setActiveConversation(conv); // same chat again
+          final next = provider.sendMessage('second');
+          await pumpEventQueue();
+          search.complete([...oneResult]);
+          await orphan;
+          await pumpEventQueue();
+
+          // The orphan's rollback must not eat the new exchange's bubbles,
+          // and the new exchange's own rollback must still find its tail.
+          expect(conv.messages.map((m) => m.role),
+              ['user', 'user', 'assistant']);
+          controller.addError(Exception('server died'));
+          await controller.close();
+          await next;
+          expect(conv.messages.map((m) => m.role),
+              ['user', 'user', 'assistant']);
+          expect(conv.messages.last.isError, isTrue);
+        });
+      });
+
+      test('parallel tool calls from separate chunks are all executed',
+          () async {
+        stubLegs((leg, _) => leg == 1
+            ? Stream.fromIterable([
+                ChatStreamEvent(toolCalls: [searchCall('alpha')]),
+                ChatStreamEvent(toolCalls: [searchCall('beta')], done: true),
+              ])
+            : answerLeg());
+        when(() => mock.searchSearXNG(any(), any()))
+            .thenAnswer((_) async => [...oneResult]);
+
+        await provider.sendMessage('question');
+
+        verify(() => mock.searchSearXNG(any(), 'alpha')).called(1);
+        verify(() => mock.searchSearXNG(any(), 'beta')).called(1);
+        expect(conv.messages.map((m) => m.role),
+            ['user', 'assistant', 'tool', 'tool', 'assistant']);
+        expect(conv.messages[1].toolCalls, hasLength(2));
+      });
+
+      group('iteration cap', () {
+        test('the last leg is sent without tools so the model must answer',
+            () async {
+          final toolsPerLeg = <Object?>[];
+          stubLegs((leg, inv) {
+            toolsPerLeg.add(inv.namedArguments[#tools]);
+            return leg < 5 ? toolCallLeg('q$leg') : answerLeg('final answer');
+          });
+          when(() => mock.searchSearXNG(any(), any()))
+              .thenAnswer((_) async => [...oneResult]);
+
+          await provider.sendMessage('question');
+
+          expect(toolsPerLeg, hasLength(5));
+          expect(toolsPerLeg.take(4), everyElement(isNotNull));
+          expect(toolsPerLeg.last, isNull);
+          expect(conv.messages.last.role, 'assistant');
+          expect(conv.messages.last.content, 'final answer');
+        });
+
+        test('tool calls on the tool-less last leg are ignored', () async {
+          stubLegs((leg, _) => toolCallLeg('q$leg'));
+          when(() => mock.searchSearXNG(any(), any()))
+              .thenAnswer((_) async => [...oneResult]);
+
+          await provider.sendMessage('question');
+
+          verifyLegs(5);
+          verify(() => mock.searchSearXNG(any(), any())).called(4);
+          // no dangling tool-calling bubble after the last tool result — the
+          // answerless last leg is reported, not left as an empty bubble
+          expect(conv.messages.last.role, 'assistant');
+          expect(conv.messages.last.isError, isTrue);
+          expect(conv.messages.last.toolCalls, isNull);
+          expect(provider.isAnyStreaming, isFalse);
+        });
+      });
+
+      group('models without the tools capability', () {
+        test('are not sent tools even when the chat has web search on',
+            () async {
+          Object? sentTools = 'unset';
+          stubLegs((_, inv) {
+            sentTools = inv.namedArguments[#tools];
+            return answerLeg();
+          });
+
+          await provider.sendMessage('question',
+              capabilities: const ModelCapabilities(supportsTools: false));
+
+          expect(sentTools, isNull);
+        });
+
+        test('tools are still sent while capabilities are unknown', () async {
+          Object? sentTools;
+          stubLegs((_, inv) {
+            sentTools = inv.namedArguments[#tools];
+            return answerLeg();
+          });
+
+          await provider.sendMessage('question');
+
+          expect(sentTools, isNotNull);
+        });
+      });
+
+      group('empty replies', () {
+        test('a completely empty reply becomes an error bubble', () async {
+          stubLegs((_, _) =>
+              Stream.fromIterable([const ChatStreamEvent(done: true)]));
+
+          await provider.sendMessage('question');
+
+          expect(conv.messages.map((m) => m.role), ['user', 'assistant']);
+          expect(conv.messages.last.isError, isTrue);
+          expect(conv.messages.last.content, isNotEmpty);
+        });
+
+        test('an empty final answer after a tool call becomes an error bubble',
+            () async {
+          stubLegs((leg, _) => leg == 1
+              ? toolCallLeg('dart')
+              : Stream.fromIterable([const ChatStreamEvent(done: true)]));
+          when(() => mock.searchSearXNG(any(), any()))
+              .thenAnswer((_) async => [...oneResult]);
+
+          await provider.sendMessage('question');
+
+          expect(conv.messages.map((m) => m.role),
+              ['user', 'assistant', 'tool', 'assistant']);
+          expect(conv.messages.last.isError, isTrue);
+        });
+
+        test('a thinking-only reply is kept', () async {
+          stubLegs((_, _) => Stream.fromIterable(
+              [const ChatStreamEvent(thinkingToken: 'hmm', done: true)]));
+
+          await provider.sendMessage('question');
+
+          expect(conv.messages.map((m) => m.role), ['user', 'assistant']);
+          expect(conv.messages.last.thinking, 'hmm');
+        });
+      });
+
+      group('malformed tool calls', () {
+        ChatMessage? lastToolMessage() =>
+            conv.messages.where((m) => m.role == 'tool').lastOrNull;
+
+        test('a non-string query is coerced to text', () async {
+          stubLegs((leg, _) => leg == 1 ? toolCallLeg(42) : answerLeg());
+          when(() => mock.searchSearXNG(any(), any()))
+              .thenAnswer((_) async => [...oneResult]);
+
+          await provider.sendMessage('question');
+
+          verify(() => mock.searchSearXNG(any(), '42')).called(1);
+          expect(conv.messages.last.content, 'answer');
+        });
+
+        test('arguments sent as a JSON string are parsed and echoed as an object',
+            () async {
+          final captured = <List<ChatMessage>>[];
+          stubLegs((leg, inv) {
+            captured.add(List.of(inv.positionalArguments[1] as List<ChatMessage>));
+            return leg == 1
+                ? Stream.fromIterable([
+                    const ChatStreamEvent(toolCalls: [
+                      {
+                        'function': {
+                          'name': 'web_search',
+                          'arguments': '{"query": "dart"}',
+                        },
+                      },
+                    ], done: true),
+                  ])
+                : answerLeg();
+          });
+          when(() => mock.searchSearXNG(any(), any()))
+              .thenAnswer((_) async => [...oneResult]);
+
+          await provider.sendMessage('question');
+
+          verify(() => mock.searchSearXNG(any(), 'dart')).called(1);
+          // Ollama rejects string arguments in the resent history
+          final echoed = captured[1].firstWhere((m) => m.toolCalls != null);
+          final arguments =
+              (echoed.toolCalls!.single['function'] as Map)['arguments'];
+          expect(arguments, {'query': 'dart'});
+        });
+
+        test('unusable calls become tool results instead of failing the exchange',
+            () async {
+          stubLegs((leg, _) => leg == 1
+              ? Stream.fromIterable([
+                  const ChatStreamEvent(toolCalls: [
+                    {
+                      'function': {
+                        'name': 'web_search',
+                        'arguments': '{not json',
+                      },
+                    },
+                    {'id': 'no-function'},
+                    {
+                      'function': {'name': 'web_search', 'arguments': '[1]'},
+                    },
+                  ], done: true),
+                ])
+              : answerLeg());
+
+          await provider.sendMessage('question');
+
+          verifyNever(() => mock.searchSearXNG(any(), any()));
+          final tools = conv.messages.where((m) => m.role == 'tool').toList();
+          // exactly one tool message per call, in order
+          expect(tools, hasLength(3));
+          expect(tools[0].content, startsWith('Invalid tool arguments'));
+          expect(tools[1].content, startsWith('Invalid tool call'));
+          expect(tools[2].content, startsWith('Invalid tool arguments'));
+          expect(conv.messages.last.content, 'answer');
+          expect(conv.messages.any((m) => m.isError), isFalse);
+        });
+
+        test('missing arguments search with an empty query', () async {
+          stubLegs((leg, _) => leg == 1
+              ? Stream.fromIterable([
+                  const ChatStreamEvent(toolCalls: [
+                    {
+                      'function': {'name': 'web_search'},
+                    },
+                  ], done: true),
+                ])
+              : answerLeg());
+          when(() => mock.searchSearXNG(any(), any()))
+              .thenAnswer((_) async => [...oneResult]);
+
+          await provider.sendMessage('question');
+
+          verify(() => mock.searchSearXNG(any(), '')).called(1);
+        });
+
+        test('zero search results are reported as such', () async {
+          stubLegs((leg, _) => leg == 1 ? toolCallLeg('dart') : answerLeg());
+          when(() => mock.searchSearXNG(any(), any()))
+              .thenAnswer((_) async => []);
+
+          await provider.sendMessage('question');
+
+          expect(lastToolMessage()!.content, 'No results found.');
+        });
+      });
+
+      test('a model switch mid-exchange applies from the next message',
+          () async {
+        final models = <Object?>[];
+        stubLegs((leg, inv) {
+          models.add(inv.positionalArguments[0]);
+          return leg == 1 ? toolCallLeg('dart') : answerLeg();
+        });
+        when(() => mock.searchSearXNG(any(), any())).thenAnswer((_) async {
+          // user picks another model while the search runs
+          provider.changeConversationModel(conv.id, 'phi3');
+          return [...oneResult];
+        });
+
+        await provider.sendMessage('question');
+        await pumpEventQueue();
+
+        expect(models, ['qwen3', 'qwen3']);
+        // the title request belongs to the exchange too
+        verify(() => mock.generateText('qwen3', any(),
+            think: any(named: 'think'))).called(1);
+
+        await provider.sendMessage('next');
+        expect(models.last, 'phi3');
+      });
+    });
+
+    test('retry does not consume attachments staged for the next message',
+        () async {
+      final mock = MockOllamaService();
+      provider.setService(mock);
+      final conv = provider.createConversation('llava');
+      when(() => mock.streamChat(
+            any(),
+            any(),
+            think: any(named: 'think'),
+            tools: any(named: 'tools'),
+            numCtx: any(named: 'numCtx'),
+          )).thenAnswer((_) => Stream.fromIterable(
+          [const ChatStreamEvent(contentToken: 'ok', done: true)]));
+      when(() => mock.generateText(any(), any(), think: any(named: 'think')))
+          .thenAnswer((_) async => '');
+
+      await provider.sendMessage('text only');
+      provider.addPendingImage('staged-image');
+      provider.setPendingFile('notes.txt', 'ZGF0YQ==', 'text/plain');
+
+      await provider.retryLastMessage();
+
+      expect(conv.messages.first.content, 'text only');
+      expect(conv.messages.first.images, isNull);
+      expect(conv.messages.first.files, isNull);
+      expect(provider.pendingImages, ['staged-image']);
+      expect(provider.pendingFileName, 'notes.txt');
+    });
+
+    test('retry and edit re-send the old message\'s own attachments only',
+        () async {
+      final mock = MockOllamaService();
+      provider.setService(mock);
+      final conv = provider.createConversation('llava');
+      when(() => mock.streamChat(
+            any(),
+            any(),
+            think: any(named: 'think'),
+            tools: any(named: 'tools'),
+            numCtx: any(named: 'numCtx'),
+          )).thenAnswer((_) => Stream.fromIterable(
+          [const ChatStreamEvent(contentToken: 'ok', done: true)]));
+      when(() => mock.generateText(any(), any(), think: any(named: 'think')))
+          .thenAnswer((_) async => '');
+
+      void seed() {
+        conv.messages
+          ..clear()
+          ..addAll([
+            ChatMessage(
+              role: 'user',
+              content: 'look',
+              images: ['old-1', 'old-2'],
+              files: [
+                {'name': 'a.txt', 'data': 'YQ==', 'type': 'text/plain'},
+                {'name': 'b.txt', 'data': 'Yg==', 'type': 'text/plain'},
+              ],
+            ),
+            ChatMessage(role: 'assistant', content: 'seen'),
+          ]);
+      }
+
+      provider.addPendingImage('staged-image');
+
+      seed();
+      await provider.retryLastMessage();
+      expect(conv.messages.first.images, ['old-1', 'old-2']);
+      expect(conv.messages.first.files!.map((f) => f['name']),
+          ['a.txt', 'b.txt']);
+      expect(provider.pendingImages, ['staged-image']);
+
+      seed();
+      await provider.editAndResend(conv.messages.first, 'look again');
+      expect(conv.messages.first.content, 'look again');
+      expect(conv.messages.first.images, ['old-1', 'old-2']);
+      expect(conv.messages.first.files, hasLength(2));
+      expect(provider.pendingImages, ['staged-image']);
+
+      // …and a plain edit of a text-only message must not pick the staged
+      // image up either
+      conv.messages
+        ..clear()
+        ..addAll([
+          ChatMessage(role: 'user', content: 'plain'),
+          ChatMessage(role: 'assistant', content: 'ok'),
+        ]);
+      await provider.editAndResend(conv.messages.first, 'plain again');
+      expect(conv.messages.first.images, isNull);
+      expect(provider.pendingImages, ['staged-image']);
+    });
+
+    test('editing a later message with the opener\'s text keeps the title',
+        () async {
+      final mock = MockOllamaService();
+      provider.setService(mock);
+      final conv = provider.createConversation('llama3');
+      when(() => mock.streamChat(
+            any(),
+            any(),
+            think: any(named: 'think'),
+            tools: any(named: 'tools'),
+            numCtx: any(named: 'numCtx'),
+          )).thenAnswer((_) => Stream.fromIterable(
+          [const ChatStreamEvent(contentToken: 'ok', done: true)]));
+      when(() => mock.generateText(any(), any(), think: any(named: 'think')))
+          .thenAnswer((_) async => '');
+
+      await provider.sendMessage('continue');
+      await provider.sendMessage('continue');
+      expect(conv.title, 'continue');
+
+      await provider.editAndResend(conv.messages[2], 'something else');
+
+      expect(conv.title, 'continue');
+    });
+
+    test('importConversations dedupes within the imported batch', () {
+      final added = provider.importConversations([
+        Conversation(id: 'dup', model: 'llama3', title: 'first'),
+        Conversation(id: 'dup', model: 'llama3', title: 'second'),
+        Conversation(id: 'other', model: 'phi3'),
+      ]);
+
+      expect(added, 2);
+      expect(provider.conversations.map((c) => c.id).toSet(),
+          {'dup', 'other'});
+      expect(provider.conversations, hasLength(2));
+    });
+
+    test('restoreConversation is a no-op when the id is already present', () {
+      final a = provider.createConversation('llama3');
+      final removed = provider.deleteConversationForUndo(a.id)!;
+
+      provider.restoreConversation(removed.$1, removed.$2);
+      provider.restoreConversation(removed.$1, removed.$2); // double undo
+
+      expect(provider.conversations.where((c) => c.id == a.id), hasLength(1));
+    });
+
+    group('save failures', () {
+      Future<List<Object>> uncaughtErrorsFrom(
+          MockStorageService storage) async {
+        final p = ChatProvider(storageService: storage);
+        addTearDown(p.dispose);
+        final errors = <Object>[];
+        await runZonedGuarded(() async {
+          p.createConversation('llama3');
+          p.renameConversation(p.conversations.first.id, 'renamed');
+          await pumpEventQueue();
+        }, (e, _) => errors.add(e));
+        verify(() => storage.saveConversations(any())).called(2);
+        return errors;
+      }
+
+      test('an asynchronous failure does not escape as an unhandled error',
+          () async {
+        final storage = MockStorageService();
+        when(() => storage.saveConversations(any()))
+            .thenAnswer((_) async => throw Exception('disk full'));
+
+        expect(await uncaughtErrorsFrom(storage), isEmpty);
+      });
+
+      test('a synchronous failure does not escape either', () async {
+        final storage = MockStorageService();
+        when(() => storage.saveConversations(any()))
+            .thenThrow(Exception('unwritable'));
+
+        expect(await uncaughtErrorsFrom(storage), isEmpty);
+      });
+    });
+
+    test('long generated titles and prompts are cut on grapheme boundaries',
+        () async {
+      final mock = MockOllamaService();
+      provider.setService(mock);
+      final conv = provider.createConversation('llama3');
+      when(() => mock.streamChat(
+            any(),
+            any(),
+            think: any(named: 'think'),
+            tools: any(named: 'tools'),
+            numCtx: any(named: 'numCtx'),
+          )).thenAnswer((_) => Stream.fromIterable(
+          [const ChatStreamEvent(contentToken: 'ok', done: true)]));
+      String? prompt;
+      when(() => mock.generateText(any(), any(), think: any(named: 'think')))
+          .thenAnswer((inv) async {
+        prompt = inv.positionalArguments[1] as String;
+        // an odd prefix puts the 60th UTF-16 unit in the middle of an emoji
+        return 'a${'😀' * 70}';
+      });
+
+      await provider.sendMessage('a${'😀' * 600}');
+      await pumpEventQueue();
+
+      expect(conv.title, 'a${'😀' * 59}…');
+      expect(prompt, contains('User: a${'😀' * 499}\n\nAssistant:'));
+    });
   });
 }
+
+Map<String, dynamic> searchCall(Object? query) => {
+      'function': {
+        'name': 'web_search',
+        'arguments': {'query': query},
+      },
+    };

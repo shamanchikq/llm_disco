@@ -7,6 +7,22 @@ import '../providers/connection_provider.dart';
 import '../providers/model_provider.dart';
 import '../theme/app_theme.dart';
 
+/// Where a model's page lives on the web. Library models (`gemma3:4b`) are
+/// under /library; community models (`user/model:tag`) sit directly under
+/// ollama.com; Hugging Face pulls (`hf.co/org/repo:Q4_K_M`) belong on
+/// huggingface.co. The tag is never part of the page address.
+Uri modelPageUri(String modelName) {
+  final base = modelName.split(':').first;
+  for (final prefix in const ['hf.co/', 'huggingface.co/']) {
+    if (base.startsWith(prefix)) {
+      return Uri.https('huggingface.co', '/${base.substring(prefix.length)}');
+    }
+  }
+  return base.contains('/')
+      ? Uri.https('ollama.com', '/$base')
+      : Uri.https('ollama.com', '/library/$base');
+}
+
 class ModelManagementScreen extends StatefulWidget {
   const ModelManagementScreen({super.key});
 
@@ -23,6 +39,15 @@ class _ModelManagementScreenState extends State<ModelManagementScreen>
   bool _isSearching = false;
   String? _searchError;
 
+  /// Bumped per search so a slow earlier response can't overwrite a later one.
+  int _searchSeq = 0;
+
+  /// Query of the last search that finished successfully; lets an empty
+  /// result say "No models found" instead of the pre-search hint.
+  String? _completedQuery;
+
+  bool _capabilityFetchScheduled = false;
+
   // Expandable card state
   int? _expandedIndex;
   List<ModelTag>? _curatedTags;
@@ -36,14 +61,35 @@ class _ModelManagementScreenState extends State<ModelManagementScreen>
   void initState() {
     super.initState();
     _tabController = TabController(length: 2, vsync: this);
+  }
+
+  /// Capabilities are loaded lazily elsewhere, so a model that shows up while
+  /// this screen is open (a finished pull, a refresh) has none yet. Fetch
+  /// whatever is missing — except models that already failed, which wait for
+  /// an explicit retry instead of being hammered on every rebuild.
+  void _scheduleCapabilityFetch(ModelProvider modelProvider) {
+    if (_capabilityFetchScheduled) return;
+    bool needsFetch(String model) =>
+        modelProvider.getCapabilities(model) == null &&
+        !modelProvider.capabilitiesFailed(model);
+    if (!modelProvider.models.any(needsFetch)) return;
+
+    _capabilityFetchScheduled = true;
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      final modelProvider = context.read<ModelProvider>();
+      _capabilityFetchScheduled = false;
+      if (!mounted) return;
       final service = context.read<ConnectionProvider>().service;
       if (service == null) return;
-      for (final model in modelProvider.models) {
+      for (final model in modelProvider.models.where(needsFetch)) {
         modelProvider.fetchCapabilities(service, model);
       }
     });
+  }
+
+  void _retryCapabilities(String model) {
+    final service = context.read<ConnectionProvider>().service;
+    if (service == null) return;
+    context.read<ModelProvider>().retryCapabilities(service, model);
   }
 
   @override
@@ -60,9 +106,11 @@ class _ModelManagementScreenState extends State<ModelManagementScreen>
     final service = context.read<ConnectionProvider>().service;
     if (service == null) return;
 
+    final id = ++_searchSeq;
     setState(() {
       _isSearching = true;
       _searchError = null;
+      _completedQuery = null;
       _expandedIndex = null;
       _curatedTags = null;
       _allTags = null;
@@ -73,11 +121,14 @@ class _ModelManagementScreenState extends State<ModelManagementScreen>
 
     try {
       final results = await service.searchOllamaCom(query);
+      if (!mounted || id != _searchSeq) return;
       setState(() {
         _searchResults = results;
+        _completedQuery = query;
         _isSearching = false;
       });
     } catch (e) {
+      if (!mounted || id != _searchSeq) return;
       setState(() {
         _searchError = e.toString();
         _isSearching = false;
@@ -99,13 +150,15 @@ class _ModelManagementScreenState extends State<ModelManagementScreen>
     );
   }
 
-  void _openModelPage(String modelName) {
-    // Strip the tag part (e.g. "gemma3:4b" -> "gemma3")
-    final baseName = modelName.split(':').first;
-    launchUrl(
-      Uri.https('ollama.com', '/library/$baseName'),
-      mode: LaunchMode.externalApplication,
-    );
+  Future<void> _openModelPage(String modelName) async {
+    try {
+      await launchUrl(
+        modelPageUri(modelName),
+        mode: LaunchMode.externalApplication,
+      );
+    } catch (_) {
+      // No browser available / launch refused — nothing useful to show.
+    }
   }
 
   void _toggleExpanded(int index) {
@@ -135,6 +188,14 @@ class _ModelManagementScreenState extends State<ModelManagementScreen>
     _loadCuratedTags(index);
   }
 
+  /// Whether card [index] is still expanded *for the model* [name]. The index
+  /// alone isn't enough: a new search puts a different model at the same
+  /// position, and a late response for the old one must not land on it.
+  bool _isExpandedFor(int index, String name) =>
+      _expandedIndex == index &&
+      index < _searchResults.length &&
+      _searchResults[index].name == name;
+
   Future<void> _loadCuratedTags(int index) async {
     final service = context.read<ConnectionProvider>().service;
     if (service == null) return;
@@ -148,7 +209,7 @@ class _ModelManagementScreenState extends State<ModelManagementScreen>
       if (curated.isEmpty) {
         all = await service.fetchModelTagsFromWeb(name);
       }
-      if (mounted && _expandedIndex == index) {
+      if (mounted && _isExpandedFor(index, name)) {
         setState(() {
           _curatedTags = curated.isEmpty ? null : curated;
           _allTags = all;
@@ -157,7 +218,7 @@ class _ModelManagementScreenState extends State<ModelManagementScreen>
         });
       }
     } catch (e) {
-      if (mounted && _expandedIndex == index) {
+      if (mounted && _isExpandedFor(index, name)) {
         setState(() {
           _tagsError = e.toString();
           _isLoadingTags = false;
@@ -180,12 +241,12 @@ class _ModelManagementScreenState extends State<ModelManagementScreen>
     final service = context.read<ConnectionProvider>().service;
     if (service == null) return;
     final messenger = ScaffoldMessenger.of(context);
+    final name = _searchResults[index].name;
 
     setState(() => _isLoadingAllTags = true);
     try {
-      final all =
-          await service.fetchModelTagsFromWeb(_searchResults[index].name);
-      if (mounted && _expandedIndex == index) {
+      final all = await service.fetchModelTagsFromWeb(name);
+      if (mounted && _isExpandedFor(index, name)) {
         setState(() {
           _allTags = all;
           _showAllTags = true;
@@ -193,7 +254,7 @@ class _ModelManagementScreenState extends State<ModelManagementScreen>
         });
       }
     } catch (e) {
-      if (mounted && _expandedIndex == index) {
+      if (mounted && _isExpandedFor(index, name)) {
         setState(() => _isLoadingAllTags = false);
         messenger
           ..clearSnackBars()
@@ -275,7 +336,9 @@ class _ModelManagementScreenState extends State<ModelManagementScreen>
     final theme = Theme.of(context);
     final colors = theme.colorScheme;
     final tokens = theme.extension<DiscoTokens>()!;
-    final modelCount = context.watch<ModelProvider>().models.length;
+    final modelProvider = context.watch<ModelProvider>();
+    final modelCount = modelProvider.models.length;
+    _scheduleCapabilityFetch(modelProvider);
     final baseUrl = context.watch<ConnectionProvider>().baseUrl;
     final host = baseUrl.replaceFirst(RegExp(r'^https?://'), '');
 
@@ -353,7 +416,13 @@ class _ModelManagementScreenState extends State<ModelManagementScreen>
     final modelProvider = context.read<ModelProvider>();
     await modelProvider.fetchModels(service);
     for (final model in modelProvider.models) {
-      modelProvider.fetchCapabilities(service, model);
+      // A manual refresh also retries failed capability loads, bypassing
+      // their cooldown.
+      if (modelProvider.capabilitiesFailed(model)) {
+        modelProvider.retryCapabilities(service, model);
+      } else {
+        modelProvider.fetchCapabilities(service, model);
+      }
     }
   }
 
@@ -365,16 +434,49 @@ class _ModelManagementScreenState extends State<ModelManagementScreen>
   ) {
     final modelProvider = context.watch<ModelProvider>();
     final models = modelProvider.models;
+    final error = modelProvider.error;
 
+    // Same look as the pull-error banner in the Discover tab, plus Retry.
+    final errorBanner = error == null
+        ? null
+        : Container(
+            width: double.infinity,
+            padding: const EdgeInsets.fromLTRB(12, 4, 4, 4),
+            color: colors.error.withValues(alpha: 0.12),
+            child: Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    error,
+                    style: TextStyle(color: colors.error, fontSize: 13),
+                  ),
+                ),
+                TextButton(
+                  onPressed: _refreshInstalledModels,
+                  style:
+                      TextButton.styleFrom(foregroundColor: colors.error),
+                  child: const Text('Retry'),
+                ),
+              ],
+            ),
+          );
+
+    final Widget list;
     if (models.isEmpty) {
-      return RefreshIndicator(
+      list = RefreshIndicator(
         onRefresh: _refreshInstalledModels,
         child: CustomScrollView(
+          // Without this the pull gesture does nothing when the content
+          // doesn't overflow — i.e. exactly in the empty state.
+          physics: const AlwaysScrollableScrollPhysics(),
           slivers: [
             SliverFillRemaining(
               child: Center(
                 child: Text(
-                  'No models installed',
+                  // With a failed load the list is unknown, not empty.
+                  error == null
+                      ? 'No models installed'
+                      : 'Model list unavailable',
                   style: theme.textTheme.bodyLarge?.copyWith(
                     color: tokens.textMuted,
                   ),
@@ -384,77 +486,91 @@ class _ModelManagementScreenState extends State<ModelManagementScreen>
           ],
         ),
       );
-    }
-
-    return RefreshIndicator(
-      onRefresh: _refreshInstalledModels,
-      child: ListView.builder(
-        itemCount: models.length + 1,
-        itemBuilder: (context, index) {
-          if (index == models.length) {
-            return Padding(
-              padding: const EdgeInsets.all(16),
-              child: Text(
-                host.isEmpty
-                    ? '${models.length} models'
-                    : '${models.length} models on $host',
-                textAlign: TextAlign.center,
-                style:
-                    AppTheme.mono(fontSize: 11, color: tokens.textFaint),
+    } else {
+      list = RefreshIndicator(
+        onRefresh: _refreshInstalledModels,
+        child: ListView.builder(
+          physics: const AlwaysScrollableScrollPhysics(),
+          itemCount: models.length + 1,
+          itemBuilder: (context, index) {
+            if (index == models.length) {
+              return Padding(
+                padding: const EdgeInsets.all(16),
+                child: Text(
+                  host.isEmpty
+                      ? '${models.length} models'
+                      : '${models.length} models on $host',
+                  textAlign: TextAlign.center,
+                  style:
+                      AppTheme.mono(fontSize: 11, color: tokens.textFaint),
+                ),
+              );
+            }
+            final name = models[index];
+            final caps = modelProvider.getCapabilities(name);
+            return InkWell(
+              onTap: () => _openModelPage(name),
+              child: Container(
+                padding: const EdgeInsets.symmetric(
+                    horizontal: 15, vertical: 15),
+                decoration: BoxDecoration(
+                  border: Border(bottom: BorderSide(color: tokens.line)),
+                ),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            name,
+                            style: AppTheme.mono(
+                              fontSize: 14,
+                              color: colors.onSurface,
+                            ),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                          const SizedBox(height: 5),
+                          if (caps != null)
+                            _CapabilityIcons(caps: caps)
+                          else if (modelProvider.capabilitiesFailed(name))
+                            _CapabilitiesRetry(
+                              onTap: () => _retryCapabilities(name),
+                            )
+                          else
+                            SizedBox(
+                              height: 12,
+                              width: 12,
+                              child: CircularProgressIndicator(
+                                strokeWidth: 1.5,
+                                color: tokens.textFaint,
+                              ),
+                            ),
+                        ],
+                      ),
+                    ),
+                    IconButton(
+                      icon: Icon(Icons.delete_outline_rounded,
+                          size: 18, color: tokens.textFaint),
+                      tooltip: 'Delete',
+                      onPressed: () => _deleteModel(name),
+                    ),
+                  ],
+                ),
               ),
             );
-          }
-          final name = models[index];
-          final caps = modelProvider.getCapabilities(name);
-          return InkWell(
-            onTap: () => _openModelPage(name),
-            child: Container(
-              padding: const EdgeInsets.symmetric(
-                  horizontal: 15, vertical: 15),
-              decoration: BoxDecoration(
-                border: Border(bottom: BorderSide(color: tokens.line)),
-              ),
-              child: Row(
-                children: [
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          name,
-                          style: AppTheme.mono(
-                            fontSize: 14,
-                            color: colors.onSurface,
-                          ),
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                        const SizedBox(height: 5),
-                        caps == null
-                            ? SizedBox(
-                                height: 12,
-                                width: 12,
-                                child: CircularProgressIndicator(
-                                  strokeWidth: 1.5,
-                                  color: tokens.textFaint,
-                                ),
-                              )
-                            : _CapabilityIcons(caps: caps),
-                      ],
-                    ),
-                  ),
-                  IconButton(
-                    icon: Icon(Icons.delete_outline_rounded,
-                        size: 18, color: tokens.textFaint),
-                    tooltip: 'Delete',
-                    onPressed: () => _deleteModel(name),
-                  ),
-                ],
-              ),
-            ),
-          );
-        },
-      ),
+          },
+        ),
+      );
+    }
+
+    if (errorBanner == null) return list;
+    return Column(
+      children: [
+        errorBanner,
+        Expanded(child: list),
+      ],
     );
   }
 
@@ -641,7 +757,9 @@ class _ModelManagementScreenState extends State<ModelManagementScreen>
                   : _searchResults.isEmpty
                       ? Center(
                           child: Text(
-                            'Search for models on ollama.com',
+                            _completedQuery != null
+                                ? 'No models found for "$_completedQuery"'
+                                : 'Search for models on ollama.com',
                             style: theme.textTheme.bodyMedium?.copyWith(
                               color: tokens.textFaint,
                             ),
@@ -888,6 +1006,38 @@ class _ModelManagementScreenState extends State<ModelManagementScreen>
             ),
           ),
       ],
+    );
+  }
+}
+
+/// Static "couldn't load" state for a model whose capability fetch failed —
+/// tapping it retries.
+class _CapabilitiesRetry extends StatelessWidget {
+  final VoidCallback onTap;
+
+  const _CapabilitiesRetry({required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    final tokens = Theme.of(context).extension<DiscoTokens>()!;
+
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(6),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 3),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.refresh_rounded, size: 13, color: tokens.textFaint),
+            const SizedBox(width: 5),
+            Text(
+              "couldn't load capabilities · tap to retry",
+              style: AppTheme.mono(fontSize: 11, color: tokens.textFaint),
+            ),
+          ],
+        ),
+      ),
     );
   }
 }

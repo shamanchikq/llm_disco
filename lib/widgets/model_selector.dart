@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../models/model_capabilities.dart';
+import '../providers/chat_provider.dart';
 import '../providers/connection_provider.dart';
 import '../providers/model_provider.dart';
 import '../theme/app_theme.dart';
@@ -64,6 +65,33 @@ Future<void> showModelPickerSheet(
       ),
     ),
   );
+}
+
+/// The one "new chat" action behind the app bar's "+", the sidebar button
+/// and the no-conversation empty state. Never invents a model: with none
+/// selected it explains instead of creating a chat that can't answer. An
+/// untouched active chat is reused rather than stacking up empty ones.
+void startNewChat(BuildContext context) {
+  final modelProvider = context.read<ModelProvider>();
+  final connectionProvider = context.read<ConnectionProvider>();
+  final chatProvider = context.read<ChatProvider>();
+  final model = modelProvider.selectedModel;
+  if (model == null) {
+    ScaffoldMessenger.of(context)
+      ..clearSnackBars()
+      ..showSnackBar(const SnackBar(
+        content: Text(
+            'No model installed yet. Install one from Manage models first.'),
+      ));
+    return;
+  }
+  final active = chatProvider.activeConversation;
+  if (active != null && active.messages.isEmpty) return;
+  chatProvider.createConversation(model);
+  final service = connectionProvider.service;
+  if (service != null) {
+    modelProvider.fetchCapabilities(service, model);
+  }
 }
 
 class _CapabilityBadges extends StatelessWidget {

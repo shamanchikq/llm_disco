@@ -38,6 +38,18 @@ class MessageBubble extends StatelessWidget {
     this.metaLabel,
   });
 
+  /// The only link targets opened from model-controlled text: http(s) URLs
+  /// with a host. `tel:`, `sms:`, `file:`, `intent:` and app deep links — and
+  /// anything that doesn't even parse — are refused rather than launched.
+  static Uri? safeLinkTarget(String? href) {
+    if (href == null) return null;
+    final uri = Uri.tryParse(href.trim());
+    if (uri == null) return null;
+    if (uri.scheme != 'http' && uri.scheme != 'https') return null;
+    if (uri.host.isEmpty) return null;
+    return uri;
+  }
+
   void _copyToClipboard(BuildContext context) {
     Clipboard.setData(ClipboardData(text: message.content));
     ScaffoldMessenger.of(context)
@@ -161,6 +173,15 @@ class MessageBubble extends StatelessWidget {
                       color: tokens.textFaint,
                       onTap: onEdit!,
                     ),
+                  // The long-press sheet that also offers this loses to the
+                  // SelectableText's own gestures, so surface it here.
+                  if (onDelete != null)
+                    _MetaAction(
+                      icon: Icons.delete_outline_rounded,
+                      tooltip: 'Delete',
+                      color: tokens.textFaint,
+                      onTap: onDelete!,
+                    ),
                 ],
               ),
             ),
@@ -245,11 +266,8 @@ class MessageBubble extends StatelessWidget {
               data: message.content,
               selectable: true,
               builders: {'pre': CodeBlockBuilder()},
-              onTapLink: (text, href, title) {
-                if (href != null) {
-                  launchUrl(Uri.parse(href));
-                }
-              },
+              imageBuilder: _markdownImagePlaceholder,
+              onTapLink: (text, href, title) => _openLink(href),
               styleSheet: _buildMarkdownStyle(theme, msgColors, tokens),
             ),
           if (isError && onRetry != null) ...[
@@ -282,7 +300,11 @@ class MessageBubble extends StatelessWidget {
               ),
             ),
           ],
-          if (!isError && message.content.isNotEmpty && !isStreaming) ...[
+          // An empty response (e.g. a thinking model that ran out of budget)
+          // still needs Retry; Copy only makes sense with text.
+          if (!isError &&
+              !isStreaming &&
+              (message.content.isNotEmpty || onRetry != null)) ...[
             const SizedBox(height: 6),
             Row(
               children: [
@@ -293,12 +315,13 @@ class MessageBubble extends StatelessWidget {
                         AppTheme.mono(fontSize: 10.5, color: tokens.textFaint),
                   ),
                 const Spacer(),
-                _MetaAction(
-                  icon: Icons.copy_rounded,
-                  tooltip: 'Copy',
-                  color: tokens.textFaint,
-                  onTap: () => _copyToClipboard(context),
-                ),
+                if (message.content.isNotEmpty)
+                  _MetaAction(
+                    icon: Icons.copy_rounded,
+                    tooltip: 'Copy',
+                    color: tokens.textFaint,
+                    onTap: () => _copyToClipboard(context),
+                  ),
                 if (onRetry != null)
                   _MetaAction(
                     icon: Icons.refresh_rounded,
@@ -493,21 +516,122 @@ class _CachedBase64Image extends StatefulWidget {
 }
 
 class _CachedBase64ImageState extends State<_CachedBase64Image> {
-  late final Uint8List _bytes;
+  // Null when the stored data isn't valid base64 (imported or hand-edited
+  // files) — shown as a broken-image icon instead of throwing in initState.
+  Uint8List? _bytes;
 
   @override
   void initState() {
     super.initState();
-    _bytes = base64Decode(widget.base64Data);
+    _bytes = _decode(widget.base64Data);
+  }
+
+  // List items are reused for different messages, so the decoded bytes must
+  // follow the widget's data rather than being fixed at first build.
+  @override
+  void didUpdateWidget(_CachedBase64Image oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.base64Data != widget.base64Data) {
+      _bytes = _decode(widget.base64Data);
+    }
+  }
+
+  static Uint8List? _decode(String data) {
+    try {
+      return base64Decode(data);
+    } on FormatException {
+      return null;
+    }
   }
 
   @override
   Widget build(BuildContext context) {
+    final bytes = _bytes;
+    if (bytes == null) return _BrokenImage(width: widget.width);
     return Image.memory(
-      _bytes,
+      bytes,
       width: widget.width,
       fit: BoxFit.cover,
       gaplessPlayback: true,
+      errorBuilder: (_, _, _) => _BrokenImage(width: widget.width),
+    );
+  }
+}
+
+class _BrokenImage extends StatelessWidget {
+  final double width;
+
+  const _BrokenImage({required this.width});
+
+  @override
+  Widget build(BuildContext context) {
+    final tokens = Theme.of(context).extension<DiscoTokens>()!;
+    return SizedBox(
+      width: width,
+      height: 64,
+      child: Icon(Icons.broken_image_outlined, color: tokens.textFaint),
+    );
+  }
+}
+
+/// Stands in for every markdown image in model output. Fetching them would
+/// let a reply (or an injected search snippet / attached file) make the
+/// phone request an attacker's URL with no tap, leaking the IP and whatever
+/// is in the query string — so only a label is shown, and the URL opens
+/// through the same http(s)-only path as links.
+Widget _markdownImagePlaceholder(Uri uri, String? title, String? alt) =>
+    _ImagePlaceholder(uri: uri, alt: alt);
+
+Future<void> _openLink(String? href) async {
+  final target = MessageBubble.safeLinkTarget(href);
+  if (target == null) return;
+  try {
+    await launchUrl(target, mode: LaunchMode.externalApplication);
+  } on Exception {
+    // No handler available / launch refused — nothing useful to surface.
+  }
+}
+
+class _ImagePlaceholder extends StatelessWidget {
+  final Uri uri;
+  final String? alt;
+
+  const _ImagePlaceholder({required this.uri, required this.alt});
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final tokens = theme.extension<DiscoTokens>()!;
+    final altText = alt?.trim() ?? '';
+    final label = altText.isNotEmpty
+        ? altText
+        : (uri.host.isNotEmpty ? uri.host : 'image');
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: () => _openLink(uri.toString()),
+      child: Container(
+        margin: const EdgeInsets.symmetric(vertical: 2),
+        padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 4),
+        decoration: BoxDecoration(
+          border: Border.all(color: tokens.line),
+          borderRadius: BorderRadius.circular(8),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.image_outlined, size: 14, color: tokens.textFaint),
+            const SizedBox(width: 6),
+            Flexible(
+              child: Text(
+                label,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: AppTheme.mono(fontSize: 12, color: tokens.textMuted),
+              ),
+            ),
+          ],
+        ),
+      ),
     );
   }
 }
@@ -637,6 +761,7 @@ class _StreamingMarkdownState extends State<_StreamingMarkdown> {
       data: data,
       selectable: false,
       builders: {'pre': CodeBlockBuilder()},
+      imageBuilder: _markdownImagePlaceholder,
       styleSheet: widget.styleSheet,
     );
   }

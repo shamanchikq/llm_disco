@@ -58,6 +58,49 @@ void main() {
       expect(ok.toJson().containsKey('isError'), isFalse);
     });
 
+    group('legacy error bubbles', () {
+      Map<String, dynamic> json(String role, String content,
+              {Object? isError}) =>
+          {
+            'role': role,
+            'content': content,
+            'timestamp': '2024-06-15T10:30:00.000',
+            'isError': ?isError,
+          };
+
+      test('an assistant message starting with [Error: loads as an error', () {
+        // stored before the isError flag existed
+        final msg = ChatMessage.fromJson(
+            json('assistant', '[Error: Connection refused]'));
+
+        expect(msg.isError, isTrue);
+      });
+
+      test('an explicit isError value always wins', () {
+        expect(
+            ChatMessage.fromJson(
+                    json('assistant', '[Error: x]', isError: false))
+                .isError,
+            isFalse);
+        expect(
+            ChatMessage.fromJson(json('assistant', 'plain', isError: true))
+                .isError,
+            isTrue);
+      });
+
+      test('ordinary messages are not mistaken for errors', () {
+        expect(ChatMessage.fromJson(json('assistant', 'Hello')).isError,
+            isFalse);
+        // a user typing the same text is just text
+        expect(ChatMessage.fromJson(json('user', '[Error: x]')).isError,
+            isFalse);
+        // only a prefix counts
+        expect(
+            ChatMessage.fromJson(json('assistant', 'see [Error: x]')).isError,
+            isFalse);
+      });
+    });
+
     test('toApiMap includes tool_calls so history round-trips to Ollama', () {
       // Ollama's chat API expects the assistant message that requested a
       // tool to be echoed back with its tool_calls before the tool result.

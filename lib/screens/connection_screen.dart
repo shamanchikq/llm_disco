@@ -3,6 +3,7 @@ import 'package:provider/provider.dart';
 import '../providers/connection_provider.dart';
 import '../providers/chat_provider.dart';
 import '../providers/model_provider.dart';
+import '../services/ollama_service.dart';
 import '../services/storage_service.dart';
 import 'main_screen.dart';
 
@@ -25,7 +26,22 @@ class _ConnectionScreenState extends State<ConnectionScreen> {
   final authController = TextEditingController();
   bool useHttp = true;
   bool _settingsLoaded = false;
+
+  /// True from the start of [_connect] until it navigates away or fails.
+  /// `ConnectionProvider.isConnecting` alone isn't enough: it drops as soon
+  /// as the probe returns, while this screen is still saving settings and
+  /// loading models.
+  bool _busy = false;
   List<Map<String, dynamic>> _savedConnections = [];
+
+  @override
+  void dispose() {
+    ipController.dispose();
+    portController.dispose();
+    searxngController.dispose();
+    authController.dispose();
+    super.dispose();
+  }
 
   @override
   void didChangeDependencies() {
@@ -109,28 +125,9 @@ class _ConnectionScreenState extends State<ConnectionScreen> {
       return;
     }
 
-    final nameController = TextEditingController(text: ip);
     final name = await showDialog<String>(
       context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('Save Connection'),
-        content: TextField(
-          controller: nameController,
-          autofocus: true,
-          decoration: const InputDecoration(labelText: 'Profile name'),
-          onSubmitted: (v) => Navigator.pop(ctx, v.trim()),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text('Cancel'),
-          ),
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, nameController.text.trim()),
-            child: const Text('Save'),
-          ),
-        ],
-      ),
+      builder: (ctx) => _ProfileNameDialog(initialName: ip),
     );
     if (name == null || name.isEmpty || !mounted) return;
 
@@ -145,7 +142,12 @@ class _ConnectionScreenState extends State<ConnectionScreen> {
       if (searxng.isNotEmpty) 'searxngUrl': searxng,
       if (auth.isNotEmpty) 'authToken': auth,
     };
-    setState(() => _savedConnections.add(profile));
+    setState(() {
+      // Saving an existing name updates that profile instead of piling up
+      // duplicates.
+      _savedConnections.removeWhere((c) => c['name'] == name);
+      _savedConnections.add(profile);
+    });
     await storage.saveSavedConnections(_savedConnections);
   }
 
@@ -153,6 +155,7 @@ class _ConnectionScreenState extends State<ConnectionScreen> {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final connectionProvider = context.watch<ConnectionProvider>();
+    final busy = connectionProvider.isConnecting || _busy;
 
     return Scaffold(
       body: Center(
@@ -254,10 +257,8 @@ class _ConnectionScreenState extends State<ConnectionScreen> {
                       SizedBox(
                         width: double.infinity,
                         child: ElevatedButton(
-                          onPressed: connectionProvider.isConnecting
-                              ? null
-                              : () => _connect(context),
-                          child: connectionProvider.isConnecting
+                          onPressed: busy ? null : () => _connect(context),
+                          child: busy
                               ? const SizedBox(
                                   height: 20,
                                   width: 20,
@@ -284,15 +285,17 @@ class _ConnectionScreenState extends State<ConnectionScreen> {
   }
 
   Future<void> _connect(BuildContext context) async {
+    if (_busy) return;
+
+    // Read the form once, up front. The probe can take seconds (and runs on
+    // launch for auto-connect), during which the user may tap a profile chip
+    // or edit a field — everything after the first await must use these
+    // captured values, not the live controllers.
     final ip = ipController.text.trim();
     final port = portController.text.trim();
-
-    if (ip.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Please enter an IP address')),
-      );
-      return;
-    }
+    final useHttp = this.useHttp;
+    final searxngInput = searxngController.text.trim();
+    final auth = authController.text.trim();
 
     final connectionProvider = context.read<ConnectionProvider>();
     final chatProvider = context.read<ChatProvider>();
@@ -301,35 +304,115 @@ class _ConnectionScreenState extends State<ConnectionScreen> {
     final navigator = Navigator.of(context);
     final messenger = ScaffoldMessenger.of(context);
 
-    final success = await connectionProvider.connect(
-      ip: ip,
-      port: port,
-      useHttp: useHttp,
-      authToken: authController.text.trim(),
-    );
+    if (ip.isEmpty) {
+      messenger.showSnackBar(
+        const SnackBar(content: Text('Please enter an IP address')),
+      );
+      return;
+    }
 
-    if (success && mounted) {
-      final searxng = searxngController.text.trim();
-      final auth = authController.text.trim();
-      await storage.saveConnectionSettings(
+    // A bad SearXNG URL would otherwise only fail later, inside a chat, as a
+    // tool result the model paraphrases.
+    String? searxng;
+    if (searxngInput.isNotEmpty) {
+      searxng = OllamaService.normalizeSearxngUrl(searxngInput);
+      if (searxng == null) {
+        messenger.showSnackBar(
+          const SnackBar(
+            content: Text(
+                'Enter a valid SearXNG URL, e.g. http://192.168.1.x:8080'),
+          ),
+        );
+        return;
+      }
+    }
+
+    setState(() => _busy = true);
+    var navigated = false;
+    try {
+      final success = await connectionProvider.connect(
         ip: ip,
         port: port,
         useHttp: useHttp,
-        searxngUrl: searxng.isNotEmpty ? searxng : null,
-        authToken: auth.isNotEmpty ? auth : null,
+        authToken: auth,
       );
-      chatProvider.setService(connectionProvider.service!);
-      chatProvider.setSearxngUrl(searxng.isNotEmpty ? searxng : null);
-      await modelProvider.fetchModels(connectionProvider.service!);
-
       if (!mounted) return;
-      navigator.pushReplacement(
-        MaterialPageRoute(builder: (_) => const MainScreen()),
-      );
-    } else if (mounted && connectionProvider.error != null) {
-      messenger.showSnackBar(
-        SnackBar(content: Text(connectionProvider.error!)),
-      );
+
+      // Grab the service now: a later connect() could null it out.
+      final service = connectionProvider.service;
+      if (success && service != null) {
+        await storage.saveConnectionSettings(
+          ip: ip,
+          port: port,
+          useHttp: useHttp,
+          searxngUrl: searxng,
+          authToken: auth.isNotEmpty ? auth : null,
+        );
+        chatProvider.setService(service);
+        chatProvider.setSearxngUrl(searxng);
+        await modelProvider.fetchModels(service);
+
+        if (!mounted) return;
+        navigated = true;
+        navigator.pushReplacement(
+          MaterialPageRoute(builder: (_) => const MainScreen()),
+        );
+      } else if (connectionProvider.error != null) {
+        messenger.showSnackBar(
+          SnackBar(content: Text(connectionProvider.error!)),
+        );
+      }
+    } finally {
+      // After navigating, stay busy: the old route lingers through its exit
+      // transition and must not accept another tap.
+      if (!navigated && mounted) setState(() => _busy = false);
     }
+  }
+}
+
+/// Asks for a profile name. Owns its controller so it is disposed only once
+/// the dialog route is really gone — disposing right after `showDialog`
+/// returns races the dialog's exit animation.
+class _ProfileNameDialog extends StatefulWidget {
+  final String initialName;
+
+  const _ProfileNameDialog({required this.initialName});
+
+  @override
+  State<_ProfileNameDialog> createState() => _ProfileNameDialogState();
+}
+
+class _ProfileNameDialogState extends State<_ProfileNameDialog> {
+  late final TextEditingController _nameController =
+      TextEditingController(text: widget.initialName);
+
+  @override
+  void dispose() {
+    _nameController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('Save Connection'),
+      content: TextField(
+        controller: _nameController,
+        autofocus: true,
+        decoration: const InputDecoration(labelText: 'Profile name'),
+        onSubmitted: (v) => Navigator.pop(context, v.trim()),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('Cancel'),
+        ),
+        TextButton(
+          onPressed: () =>
+              Navigator.pop(context, _nameController.text.trim()),
+          child: const Text('Save'),
+        ),
+      ],
+    );
   }
 }

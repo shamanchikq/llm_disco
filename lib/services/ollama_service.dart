@@ -1,5 +1,7 @@
 import 'dart:convert';
+import 'dart:io';
 import 'package:http/http.dart' as http;
+import 'package:http/io_client.dart';
 import '../models/chat_message.dart';
 import '../models/ollama_search_result.dart';
 
@@ -54,6 +56,15 @@ class OllamaService {
 
   OllamaService(this.baseUrl, {this.authHeader});
 
+  /// Client for the long-lived, cancellable requests (chat, pull, delete).
+  /// Only the *connect* is bounded: Ollama sends response headers after the
+  /// model has loaded, which can legitimately take minutes, so a response
+  /// timeout would kill healthy requests — but connecting to a PC that is
+  /// asleep or off would otherwise hang for the OS default (~2 minutes).
+  static http.Client _newClient() => IOClient(
+        HttpClient()..connectionTimeout = const Duration(seconds: 10),
+      );
+
   Map<String, String> get _jsonHeaders => {
         'Content-Type': 'application/json',
         'Authorization': ?authHeader,
@@ -74,7 +85,7 @@ class OllamaService {
     double? repeatPenalty,
     int? seed,
   }) async* {
-    _activeClient = http.Client();
+    _activeClient = _newClient();
     try {
       final request = http.Request(
         'POST',
@@ -243,6 +254,21 @@ class OllamaService {
     }
   }
 
+  /// Turns what the user typed into a usable SearXNG base URL, or null when
+  /// it can't be one. A missing scheme defaults to http (so
+  /// `192.168.1.5:8080` and `localhost:8080` work); the result must be
+  /// http(s) with a host.
+  static String? normalizeSearxngUrl(String input) {
+    var url = input.trim();
+    if (url.isEmpty || url.contains(RegExp(r'\s'))) return null;
+    if (!url.contains('://')) url = 'http://$url';
+    final uri = Uri.tryParse(url);
+    if (uri == null) return null;
+    if (uri.scheme != 'http' && uri.scheme != 'https') return null;
+    if (uri.host.isEmpty) return null;
+    return url;
+  }
+
   Future<List<Map<String, dynamic>>> searchSearXNG(
     String searxngUrl,
     String query,
@@ -271,20 +297,27 @@ class OllamaService {
     }
   }
 
-  Future<bool> testConnection() async {
+  /// HTTP status of GET /api/tags, or 0 when the server couldn't be
+  /// reached at all (DNS/socket/timeout). Lets callers tell an auth
+  /// failure (401/403) apart from a dead server.
+  Future<int> testConnectionStatus() async {
     try {
       final response = await http.get(
         Uri.parse('$baseUrl/api/tags'),
         headers: _jsonHeaders,
       ).timeout(const Duration(seconds: 5));
-      return response.statusCode == 200;
+      return response.statusCode;
     } catch (_) {
-      return false;
+      return 0;
     }
   }
 
+  Future<bool> testConnection() async =>
+      await testConnectionStatus() == 200;
+
   Stream<PullProgressEvent> pullModel(String modelName) async* {
-    _pullClient = http.Client();
+    final client = _newClient();
+    _pullClient = client;
     try {
       final request = http.Request(
         'POST',
@@ -293,32 +326,54 @@ class OllamaService {
       request.headers.addAll(_jsonHeaders);
       request.body = jsonEncode({'model': modelName, 'stream': true});
 
-      final response = await _pullClient!.send(request);
+      final response = await client.send(request);
 
       if (response.statusCode != 200) {
         final body = await response.stream.bytesToString();
         throw Exception('HTTP ${response.statusCode}: $body');
       }
 
+      var succeeded = false;
       await for (final chunk in response.stream
           .transform(utf8.decoder)
           .transform(const LineSplitter())) {
         if (chunk.trim().isEmpty) continue;
+        // Decode on its own so only genuinely malformed JSON is skipped —
+        // field handling below must not be able to swallow an event.
+        final Map<String, dynamic> json;
         try {
-          final json = jsonDecode(chunk) as Map<String, dynamic>;
-          yield PullProgressEvent(
-            status: json['status'] as String? ?? '',
-            digest: json['digest'] as String?,
-            total: json['total'] as int?,
-            completed: json['completed'] as int?,
-          );
+          json = jsonDecode(chunk) as Map<String, dynamic>;
         } catch (_) {
-          // skip malformed lines
+          continue;
         }
+
+        // Unknown model, disk full, registry failures… arrive as an
+        // {"error": …} line on an otherwise-200 response.
+        final error = json['error'];
+        if (error != null) {
+          throw Exception('Ollama error: $error');
+        }
+
+        final status = json['status'];
+        final digest = json['digest'];
+        if (status == 'success') succeeded = true;
+        yield PullProgressEvent(
+          status: status is String ? status : '',
+          digest: digest is String ? digest : null,
+          // JSON numbers may decode as double; accept any num.
+          total: (json['total'] as num?)?.toInt(),
+          completed: (json['completed'] as num?)?.toInt(),
+        );
+      }
+
+      // A stream that ends without "success" was cut short (dropped
+      // connection, cancelled client) — it must not read as installed.
+      if (!succeeded) {
+        throw Exception('Pull ended before Ollama reported success');
       }
     } finally {
-      _pullClient?.close();
-      _pullClient = null;
+      client.close();
+      if (identical(_pullClient, client)) _pullClient = null;
     }
   }
 
@@ -330,10 +385,17 @@ class OllamaService {
     request.headers.addAll(_jsonHeaders);
     request.body = jsonEncode({'model': name});
 
-    final response = await http.Client().send(request);
-    final body = await response.stream.bytesToString();
-    if (response.statusCode != 200) {
-      throw Exception('Failed to delete model: HTTP ${response.statusCode}: $body');
+    final client = _newClient();
+    try {
+      final response =
+          await client.send(request).timeout(const Duration(seconds: 30));
+      final body = await response.stream.bytesToString();
+      if (response.statusCode != 200) {
+        throw Exception(
+            'Failed to delete model: HTTP ${response.statusCode}: $body');
+      }
+    } finally {
+      client.close();
     }
   }
 
@@ -345,8 +407,14 @@ class OllamaService {
       throw Exception('Search failed: HTTP ${response.statusCode}');
     }
 
-    final html = response.body;
+    return parseSearchResults(response.body);
+  }
+
+  /// Parses the ollama.com search page into results. Static so the scraping
+  /// can be tested against an HTML fixture without the network.
+  static List<OllamaSearchResult> parseSearchResults(String html) {
     final results = <OllamaSearchResult>[];
+    final seen = <String>{};
 
     // Match model entries, each model is in an <a href="/library/..."> block
     final blockPattern = RegExp(
@@ -356,12 +424,16 @@ class OllamaService {
     for (final match in blockPattern.allMatches(html)) {
       final name = match.group(1) ?? '';
       final block = match.group(2) ?? '';
+      // The page can link the same model more than once; one card each.
+      if (name.isEmpty || !seen.add(name)) continue;
 
-      // Extract description from <p> tags
+      // Extract description from <p> tags (may span several lines)
       String? description;
-      final descMatch = RegExp(r'<p[^>]*>(.*?)</p>').firstMatch(block);
+      final descMatch =
+          RegExp(r'<p[^>]*>(.*?)</p>', dotAll: true).firstMatch(block);
       if (descMatch != null) {
-        description = descMatch.group(1)?.replaceAll(RegExp(r'<[^>]+>'), '').trim();
+        final text = _cleanText(descMatch.group(1) ?? '');
+        description = text.isEmpty ? null : text;
       }
 
       // Extract pull count
@@ -373,24 +445,60 @@ class OllamaService {
 
       // Extract tags from spans
       final tags = <String>[];
-      final tagMatches = RegExp(r'<span[^>]*class="[^"]*tag[^"]*"[^>]*>(.*?)</span>').allMatches(block);
+      final tagMatches = RegExp(
+        r'<span[^>]*class="[^"]*tag[^"]*"[^>]*>(.*?)</span>',
+        dotAll: true,
+      ).allMatches(block);
       for (final tm in tagMatches) {
-        final tag = tm.group(1)?.replaceAll(RegExp(r'<[^>]+>'), '').trim();
-        if (tag != null && tag.isNotEmpty) tags.add(tag);
+        final tag = _cleanText(tm.group(1) ?? '');
+        if (tag.isNotEmpty) tags.add(tag);
       }
 
-      if (name.isNotEmpty) {
-        results.add(OllamaSearchResult(
-          name: name,
-          description: description,
-          pullCount: pullCount,
-          tags: tags,
-        ));
-      }
+      results.add(OllamaSearchResult(
+        name: name,
+        description: description,
+        pullCount: pullCount,
+        tags: tags,
+      ));
     }
 
     return results;
   }
+
+  /// Strips tags, decodes entities and collapses whitespace.
+  static String _cleanText(String html) => _decodeEntities(
+        html.replaceAll(RegExp(r'<[^>]+>'), ''),
+      ).replaceAll(RegExp(r'\s+'), ' ').trim();
+
+  static final _entityPattern =
+      RegExp(r'&(?:#(\d+)|#[xX]([0-9a-fA-F]+)|(amp|lt|gt|quot|apos));');
+
+  static const _namedEntities = {
+    'amp': '&',
+    'lt': '<',
+    'gt': '>',
+    'quot': '"',
+    'apos': "'",
+  };
+
+  /// Decodes the handful of entities the site emits. One pass, so
+  /// `&amp;lt;` becomes `&lt;` rather than `<`.
+  static String _decodeEntities(String text) =>
+      text.replaceAllMapped(_entityPattern, (m) {
+        final named = m.group(3);
+        if (named != null) return _namedEntities[named]!;
+        final code = m.group(1) != null
+            ? int.tryParse(m.group(1)!)
+            : int.tryParse(m.group(2)!, radix: 16);
+        // Leave nonsense references (NUL, surrogates, out of range) as-is.
+        if (code == null ||
+            code == 0 ||
+            code > 0x10FFFF ||
+            (code >= 0xD800 && code <= 0xDFFF)) {
+          return m.group(0)!;
+        }
+        return String.fromCharCode(code);
+      });
 
   /// Full tag list from `ollama.com/library/{model}/tags` — includes every
   /// quantization variant (can be 100+ entries for popular models).
