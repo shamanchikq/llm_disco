@@ -24,10 +24,12 @@ class ChatProvider extends ChangeNotifier with WidgetsBindingObserver {
   /// Cancellation is per exchange, not a provider-wide flag, so a stop or
   /// disconnect can only ever end the exchange it was meant for.
   _Exchange? _currentExchange;
-  final List<String> _pendingImages = [];
-  String? _pendingFileName;
-  String? _pendingFileBase64;
-  String? _pendingFileMimeType;
+
+  /// What the user has typed and attached but not sent yet, per conversation
+  /// (keyed by id; '' while no conversation is active). Session-only — a
+  /// half-written message or a staged photo stays with the chat it was meant
+  /// for instead of following the user into another one.
+  final Map<String, _Composer> _composers = {};
   String? _searxngUrl;
   String? _draft;
   Timer? _persistTimer;
@@ -52,7 +54,10 @@ class ChatProvider extends ChangeNotifier with WidgetsBindingObserver {
   /// a single cancellable client, so a second send has to wait.
   bool get isAnyStreaming => _streamingConversationId != null;
 
-  String? get pendingFileName => _pendingFileName;
+  _Composer get _composer =>
+      _composers.putIfAbsent(_activeConversation?.id ?? '', _Composer.new);
+
+  String? get pendingFileName => _composer.fileName;
   String? get searxngUrl => _searxngUrl;
   double? get lastTokensPerSec => _activeConversation?.lastTokensPerSec;
 
@@ -64,36 +69,47 @@ class ChatProvider extends ChangeNotifier with WidgetsBindingObserver {
     _searxngUrl = (url != null && url.trim().isNotEmpty) ? url.trim() : null;
   }
 
-  List<String> get pendingImages => List.unmodifiable(_pendingImages);
+  /// Attachments staged in the active conversation's composer.
+  List<String> get pendingImages => List.unmodifiable(_composer.images);
 
   void addPendingImage(String base64) {
-    _pendingImages.add(base64);
+    _composer.images.add(base64);
     notifyListeners();
   }
 
   void removePendingImageAt(int index) {
-    if (index < 0 || index >= _pendingImages.length) return;
-    _pendingImages.removeAt(index);
+    final images = _composer.images;
+    if (index < 0 || index >= images.length) return;
+    images.removeAt(index);
     notifyListeners();
   }
 
   void clearPendingImages() {
-    _pendingImages.clear();
+    _composer.images.clear();
     notifyListeners();
   }
 
   void setPendingFile(String name, String base64, String mimeType) {
-    _pendingFileName = name;
-    _pendingFileBase64 = base64;
-    _pendingFileMimeType = mimeType;
+    _composer
+      ..fileName = name
+      ..fileBase64 = base64
+      ..fileMimeType = mimeType;
     notifyListeners();
   }
 
   void clearPendingFile() {
-    _pendingFileName = null;
-    _pendingFileBase64 = null;
-    _pendingFileMimeType = null;
+    _composer.clearFile();
     notifyListeners();
+  }
+
+  /// Unsent text in conversation [id]'s composer ('' when there is none).
+  String composerTextFor(String id) => _composers[id]?.text ?? '';
+
+  /// Remembers the composer text of conversation [id] so it can be put back
+  /// when that chat is shown again. Doesn't notify: the text field already
+  /// shows what was typed.
+  void setComposerText(String id, String text) {
+    _composers.putIfAbsent(id, _Composer.new).text = text;
   }
 
   int _idCounter = 0;
@@ -169,20 +185,20 @@ class ChatProvider extends ChangeNotifier with WidgetsBindingObserver {
       {ModelCapabilities? capabilities}) async {
     if (!_canSend) return;
 
-    final images = _pendingImages.isNotEmpty ? List.of(_pendingImages) : null;
-    final files = _pendingFileBase64 != null
+    final composer = _composer;
+    final images = composer.images.isNotEmpty ? List.of(composer.images) : null;
+    final files = composer.fileBase64 != null
         ? [
             {
-              'name': _pendingFileName!,
-              'data': _pendingFileBase64!,
-              'type': _pendingFileMimeType!,
+              'name': composer.fileName!,
+              'data': composer.fileBase64!,
+              'type': composer.fileMimeType!,
             }
           ]
         : null;
-    _pendingImages.clear();
-    _pendingFileName = null;
-    _pendingFileBase64 = null;
-    _pendingFileMimeType = null;
+    composer
+      ..images.clear()
+      ..clearFile();
 
     await _send(content, images, files, capabilities);
   }
@@ -852,6 +868,7 @@ class ChatProvider extends ChangeNotifier with WidgetsBindingObserver {
     _abandonExchange();
     _dropPendingUndo();
     _conversations.clear();
+    _composers.clear();
     _activeConversation = null;
     _service = null;
     notifyListeners();
@@ -865,6 +882,7 @@ class ChatProvider extends ChangeNotifier with WidgetsBindingObserver {
     // "Delete all" is permanent — a pending undo must not bring one back.
     _dropPendingUndo();
     _conversations.clear();
+    _composers.clear();
     _activeConversation = null;
     notifyListeners();
     await _storageService?.deleteAll();
@@ -921,6 +939,21 @@ class ChatProvider extends ChangeNotifier with WidgetsBindingObserver {
         conv.messages.removeLast();
       }
     }
+  }
+}
+
+/// One conversation's unsent message: typed text and staged attachments.
+class _Composer {
+  final List<String> images = [];
+  String? fileName;
+  String? fileBase64;
+  String? fileMimeType;
+  String text = '';
+
+  void clearFile() {
+    fileName = null;
+    fileBase64 = null;
+    fileMimeType = null;
   }
 }
 

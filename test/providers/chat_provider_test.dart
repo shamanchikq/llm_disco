@@ -134,6 +134,73 @@ void main() {
       expect(provider.pendingImages, isEmpty);
     });
 
+    group('composer state is per conversation', () {
+      test('attachments staged in one chat stay with that chat', () {
+        final a = provider.createConversation('llama3');
+        provider.addPendingImage('photo-for-a');
+        provider.setPendingFile('notes.txt', 'ZGF0YQ==', 'text/plain');
+
+        final b = provider.createConversation('llama3');
+        expect(provider.pendingImages, isEmpty);
+        expect(provider.pendingFileName, isNull);
+
+        provider.setActiveConversation(a);
+        expect(provider.pendingImages, ['photo-for-a']);
+        expect(provider.pendingFileName, 'notes.txt');
+
+        provider.setActiveConversation(b);
+        provider.clearPendingFile();
+        provider.setActiveConversation(a);
+        expect(provider.pendingFileName, 'notes.txt');
+      });
+
+      test("a send only takes the active chat's attachments", () async {
+        final mock = MockOllamaService();
+        provider.setService(mock);
+        when(() => mock.streamChat(any(), any(),
+                think: any(named: 'think'),
+                tools: any(named: 'tools'),
+                numCtx: any(named: 'numCtx')))
+            .thenAnswer((_) => Stream.fromIterable(
+                [const ChatStreamEvent(contentToken: 'ok', done: true)]));
+        when(() => mock.generateText(any(), any(), think: any(named: 'think')))
+            .thenAnswer((_) async => '');
+
+        final a = provider.createConversation('llama3');
+        provider.addPendingImage('photo-for-a');
+        final b = provider.createConversation('llama3');
+
+        await provider.sendMessage('hello from b');
+
+        expect(b.messages.first.images, isNull);
+        provider.setActiveConversation(a);
+        expect(provider.pendingImages, ['photo-for-a']);
+      });
+
+      test('composer text is remembered per conversation id', () {
+        expect(provider.composerTextFor('a'), '');
+        provider.setComposerText('a', 'half a thought');
+        provider.setComposerText('b', 'something else');
+
+        expect(provider.composerTextFor('a'), 'half a thought');
+        expect(provider.composerTextFor('b'), 'something else');
+
+        provider.setComposerText('a', '');
+        expect(provider.composerTextFor('a'), '');
+      });
+
+      test('clear forgets every draft', () {
+        provider.createConversation('llama3');
+        provider.addPendingImage('photo');
+        provider.setComposerText('x', 'draft');
+
+        provider.clear();
+
+        expect(provider.pendingImages, isEmpty);
+        expect(provider.composerTextFor('x'), '');
+      });
+    });
+
     test('clear wipes everything', () {
       provider.createConversation('llama3');
       provider.createConversation('phi3');
