@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:path_provider/path_provider.dart';
 import '../models/conversation.dart';
 
@@ -84,23 +85,92 @@ class StorageService {
   // second during streaming) can't interleave on the same file.
   Future<void> _conversationWrites = Future.value();
 
-  Future<void> saveConversations(List<Conversation> conversations) {
+  /// Each conversation's encoded UTF-8 JSON as of the last partial save, by
+  /// id. Lets the saves made while a reply streams skip re-encoding every
+  /// other conversation — and every base64 image in them. Only partial saves
+  /// keep it: a full save drops it, so an idle app doesn't hold a second copy
+  /// of the whole history in memory.
+  final Map<String, List<int>> _encodedConversations = {};
+
+  /// How many conversations have been JSON-encoded so far. Tests read the
+  /// difference around a save to see what it actually re-encoded.
+  @visibleForTesting
+  int encodedConversationCount = 0;
+
+  /// Writes [conversations] to disk. Every conversation is re-encoded unless
+  /// [changed] is given: then only those ids (plus any with no cached
+  /// encoding) are, and the rest reuse their previous bytes. Pass [changed]
+  /// only when nothing but those conversations was modified since the last
+  /// save — anything else must go through a full save.
+  Future<void> saveConversations(List<Conversation> conversations,
+      {Set<String>? changed}) {
     // Snapshot the state now; the write itself may be queued.
-    final json = jsonEncode(conversations.map((c) => c.toJson()).toList());
-    final write = _conversationWrites.then((_) => _writeConversations(json));
+    final chunks = _encodeSnapshot(conversations, changed);
+    final write = _conversationWrites.then((_) => _writeConversations(chunks));
     // Keep the chain alive even if a write fails.
     _conversationWrites = write.catchError((_) {});
     return write;
   }
 
-  Future<void> _writeConversations(String json) async {
+  /// One encoded chunk per conversation, in list order. The cache describes
+  /// in-memory state rather than the file, so a failed write can't leave it
+  /// stale; rebuilding it from the list drops deleted conversations, so they
+  /// can never be written back from it.
+  List<List<int>> _encodeSnapshot(
+      List<Conversation> conversations, Set<String>? changed) {
+    final encoder = JsonUtf8Encoder();
+    final next = <String, List<int>>{};
+    final chunks = <List<int>>[];
+    for (final c in conversations) {
+      var bytes = (changed == null || changed.contains(c.id))
+          ? null
+          : _encodedConversations[c.id];
+      if (bytes == null) {
+        bytes = encoder.convert(c.toJson());
+        encodedConversationCount++;
+      }
+      next[c.id] = bytes;
+      chunks.add(bytes);
+    }
+    // The next exchange's first partial save re-encodes everything once.
+    _encodedConversations.clear();
+    if (changed != null) _encodedConversations.addAll(next);
+    return chunks;
+  }
+
+  static const _arrayStart = [0x5B]; // [
+  static const _arraySeparator = [0x2C]; // ,
+  static const _arrayEnd = [0x5D]; // ]
+
+  Future<void> _writeConversations(List<List<int>> chunks) async {
     final file = await _file;
     // Write to a temp file, rotate the current file to .bak, then rename
     // the temp file into place. rename() is atomic on the same filesystem,
     // so a process kill can never leave a truncated main file — at worst
     // the .bak still holds the previous good version.
     final tmp = File('${file.path}.tmp');
-    await tmp.writeAsString(json, flush: true);
+    // Streamed chunk by chunk: the result is the same bytes jsonEncode of the
+    // whole list would give, without ever holding it as one string.
+    final sink = tmp.openWrite();
+    try {
+      sink.add(_arrayStart);
+      for (var i = 0; i < chunks.length; i++) {
+        if (i > 0) sink.add(_arraySeparator);
+        sink.add(chunks[i]);
+      }
+      sink.add(_arrayEnd);
+      await sink.flush();
+    } finally {
+      await sink.close();
+    }
+    // IOSink.flush() only hands the bytes to the OS; fsync like
+    // writeAsString(flush: true) did, so the renamed file is durable.
+    final raf = await tmp.open(mode: FileMode.append);
+    try {
+      await raf.flush();
+    } finally {
+      await raf.close();
+    }
     if (await file.exists()) {
       await _renameOver(file, '${file.path}.bak');
     }
@@ -119,6 +189,8 @@ class StorageService {
   }
 
   Future<void> deleteAll() {
+    // Nothing is left to reuse, and the cache holds every conversation's bytes.
+    _encodedConversations.clear();
     // Queued behind any save in flight: deleting underneath a write made its
     // temp file vanish before the rename, or let the history reappear.
     final delete = _conversationWrites.then((_) => _deleteConversationFiles());

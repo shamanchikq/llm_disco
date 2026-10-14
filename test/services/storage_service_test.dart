@@ -336,6 +336,257 @@ void main() {
       });
     });
 
+    group('partial saves', () {
+      File mainFile() => File('${dir.path}/conversations.json');
+
+      Conversation titled(String id, String title) =>
+          Conversation(id: id, model: 'llama3', title: title);
+
+      /// What the file held before partial saves existed.
+      List<int> jsonEncodeBytes(List<Conversation> conversations) =>
+          utf8.encode(jsonEncode(conversations.map((c) => c.toJson()).toList()));
+
+      /// How many conversations [save] had to encode.
+      Future<int> encodedBy(Future<void> Function() save) async {
+        final before = storage.encodedConversationCount;
+        await save();
+        return storage.encodedConversationCount - before;
+      }
+
+      test('a full save encodes every conversation', () async {
+        final all = [conv('a'), conv('b'), conv('c')];
+
+        expect(await encodedBy(() => storage.saveConversations(all)), 3);
+      });
+
+      test('a partial save encodes only the changed conversation', () async {
+        final a = titled('a', 'A');
+        final b = titled('b', 'B');
+        final c = titled('c', 'C');
+        // Partial saves keep the cache; an empty set encodes whatever is new.
+        await storage.saveConversations([a, b, c], changed: <String>{});
+
+        b.title = 'B, edited';
+        final encoded = await encodedBy(
+            () => storage.saveConversations([a, b, c], changed: {'b'}));
+
+        expect(encoded, 1);
+        final loaded = await storage.loadConversations();
+        expect(loaded.map((x) => x.title), ['A', 'B, edited', 'C']);
+      });
+
+      test('the file after a partial save equals a full save of the same data',
+          () async {
+        final a = Conversation(id: 'a', model: 'llama3', messages: [
+          ChatMessage(role: 'user', content: 'hi', images: ['aW1hZ2U=']),
+        ]);
+        final b = titled('b', 'B');
+        final c = titled('c', 'C');
+        await storage.saveConversations([a, b, c]);
+
+        b.messages.add(ChatMessage(role: 'assistant', content: 'streamed'));
+        await storage.saveConversations([a, b, c], changed: {'b'});
+        final afterPartial = await mainFile().readAsBytes();
+
+        // a fresh service has no cache, so it encodes everything
+        final other = await Directory.systemTemp.createTemp('llm_disco_full');
+        addTearDown(() => other.delete(recursive: true));
+        await StorageService(documentsDirectory: other)
+            .saveConversations([a, b, c]);
+        final afterFull =
+            await File('${other.path}/conversations.json').readAsBytes();
+
+        expect(afterPartial, afterFull);
+        expect(afterPartial, jsonEncodeBytes([a, b, c]));
+      });
+
+      test('the bytes match jsonEncode for awkward content', () async {
+        final tricky = Conversation(
+          id: 'tricky',
+          model: 'llama3',
+          title: 'caf\u00e9 \u{1F600} \u4e2d\u6587 "quoted" \\ \u0001',
+          messages: [
+            ChatMessage(
+              role: 'user',
+              content: 'line\nbreak\ttab lone \uD800 surrogate',
+              images: ['aW1hZ2U='],
+              files: [
+                {'name': 'n.txt', 'data': 'ZGF0YQ==', 'type': 'text/plain'},
+              ],
+            ),
+            ChatMessage(
+                role: 'assistant',
+                content: '',
+                toolCalls: [
+                  {
+                    'function': {
+                      'name': 'web_search',
+                      'arguments': {'query': 'dart', 'n': 1.5},
+                    },
+                  },
+                ],
+                cutOff: true),
+          ],
+          temperature: 0.7,
+          seed: 42,
+        );
+        final all = [tricky, conv('plain')];
+
+        await storage.saveConversations(all);
+
+        expect(await mainFile().readAsBytes(), jsonEncodeBytes(all));
+      });
+
+      test('an empty list is written as an empty array', () async {
+        await storage.saveConversations([conv('a')]);
+        await storage.saveConversations([], changed: <String>{});
+
+        expect(await mainFile().readAsString(), '[]');
+      });
+
+      test('unchanged conversations are reused from the cache', () async {
+        final a = titled('a', 'A');
+        final b = titled('b', 'B');
+        await storage.saveConversations([a, b], changed: <String>{});
+
+        // Edited in memory but not named in `changed`: the caller promised
+        // nothing else moved, so the cached encoding is what gets written.
+        b.title = 'B, edited';
+        await storage.saveConversations([a, b], changed: {'a'});
+
+        final loaded = await storage.loadConversations();
+        expect(loaded.map((x) => x.title), ['A', 'B']);
+      });
+
+      test('a conversation missing from the cache is encoded anyway',
+          () async {
+        // Nothing has been saved by this service yet (e.g. right after a
+        // launch), so no id is cached — even a "partial" save has to write
+        // everything.
+        final all = [titled('a', 'A'), titled('b', 'B'), titled('c', 'C')];
+
+        final encoded = await encodedBy(
+            () => storage.saveConversations(all, changed: {'a'}));
+
+        expect(encoded, 3);
+        final loaded = await storage.loadConversations();
+        expect(loaded.map((x) => x.title), ['A', 'B', 'C']);
+      });
+
+      test('a conversation added since the last save is encoded', () async {
+        final a = titled('a', 'A');
+        await storage.saveConversations([a], changed: <String>{});
+
+        final b = titled('b', 'B');
+        final encoded = await encodedBy(
+            () => storage.saveConversations([b, a], changed: {'a'}));
+
+        expect(encoded, 2); // a (changed) and b (not cached)
+        expect((await storage.loadConversations()).map((x) => x.id),
+            ['b', 'a']);
+      });
+
+      test('a dropped conversation is never written back from the cache',
+          () async {
+        final a = titled('a', 'A');
+        final b = titled('b', 'old B');
+        await storage.saveConversations([a, b], changed: <String>{});
+
+        // b is deleted; the file loses it
+        await storage.saveConversations([a], changed: {'a'});
+        expect((await storage.loadConversations()).map((x) => x.id), ['a']);
+
+        // A different conversation now reuses the id (an import, an undo of
+        // a re-created chat). Its stale encoding must be gone.
+        final newB = titled('b', 'new B');
+        await storage.saveConversations([a, newB], changed: {'a'});
+
+        final loaded = await storage.loadConversations();
+        expect(loaded.map((x) => x.title), ['A', 'new B']);
+      });
+
+      test('deleteAll forgets the cached encodings', () async {
+        final a = titled('a', 'A');
+        await storage.saveConversations([a], changed: <String>{});
+        await storage.deleteAll();
+
+        final encoded = await encodedBy(
+            () => storage.saveConversations([a], changed: <String>{}));
+
+        expect(encoded, 1);
+        expect((await storage.loadConversations()).single.id, 'a');
+      });
+
+      test('a full save drops the cache, so idle memory holds no second copy',
+          () async {
+        final a = titled('a', 'A');
+        final b = titled('b', 'B');
+        await storage.saveConversations([a, b], changed: <String>{});
+
+        b.title = 'B, renamed'; // user-driven change, saved in full
+        await storage.saveConversations([a, b]);
+        a.title = 'A, streaming';
+        final encoded = await encodedBy(
+            () => storage.saveConversations([a, b], changed: {'a'}));
+
+        // nothing cached after the full save: both are encoded afresh
+        expect(encoded, 2);
+        final loaded = await storage.loadConversations();
+        expect(loaded.map((x) => x.title), ['A, streaming', 'B, renamed']);
+      });
+
+      test('the snapshot is taken when save is called, not when it runs',
+          () async {
+        final a = titled('a', 'A');
+        final b = titled('b', 'B');
+        await storage.saveConversations([a, b]);
+
+        a.title = 'A, saved';
+        final write = storage.saveConversations([a, b], changed: {'a'});
+        a.title = 'A, too late'; // edited while the write is queued
+        await write;
+
+        final loaded = await storage.loadConversations();
+        expect(loaded.first.title, 'A, saved');
+      });
+
+      test('still rotates the previous version into .bak', () async {
+        final a = titled('a', 'first');
+        await storage.saveConversations([a]);
+        a.title = 'second';
+        await storage.saveConversations([a], changed: {'a'});
+
+        final bak = jsonDecode(
+                await File('${dir.path}/conversations.json.bak').readAsString())
+            as List<dynamic>;
+        expect((bak.single as Map)['title'], 'first');
+        expect(File('${dir.path}/conversations.json.tmp').existsSync(),
+            isFalse);
+      });
+
+      test('a failed write leaves the queue and the cache usable', () async {
+        final missing = Directory('${dir.path}/not-yet');
+        final s = StorageService(documentsDirectory: missing);
+        final a = titled('a', 'A');
+        final b = titled('b', 'B');
+
+        await expectLater(s.saveConversations([a, b], changed: <String>{}),
+            throwsA(isA<FileSystemException>()));
+
+        missing.createSync();
+        a.title = 'A, edited';
+        final before = s.encodedConversationCount;
+        await s.saveConversations([a, b], changed: {'a'});
+
+        // only `a` was re-encoded: b's encoding survived the failed write
+        expect(s.encodedConversationCount - before, 1);
+        final written = jsonDecode(
+                await File('${missing.path}/conversations.json').readAsString())
+            as List<dynamic>;
+        expect(written.map((e) => (e as Map)['title']), ['A, edited', 'B']);
+      });
+    });
+
     test('rapid unawaited saves end with the last state on disk', () async {
       // mirrors the 1-second persist timer firing during streaming
       final futures = [

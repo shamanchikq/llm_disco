@@ -2007,6 +2007,150 @@ void main() {
       expect(provider.conversations.where((c) => c.id == a.id), hasLength(1));
     });
 
+    group('saves while streaming', () {
+      late MockStorageService storage;
+      late MockOllamaService mock;
+      late StreamController<ChatStreamEvent> controller;
+      late ChatProvider p;
+      late Conversation streaming;
+      late Conversation other;
+
+      /// The `changed` argument of every save since the last
+      /// [clearInteractions]; null for a full save.
+      List<Set<String>?> savedWith = [];
+
+      setUp(() {
+        storage = MockStorageService();
+        savedWith = [];
+        // One stub for both forms: mocktail treats an omitted named argument
+        // as null, which is exactly how a full save reads.
+        when(() => storage.saveConversations(any(),
+            changed: any(named: 'changed'))).thenAnswer((inv) async {
+          savedWith.add(inv.namedArguments[#changed] as Set<String>?);
+        });
+        mock = MockOllamaService();
+        controller = StreamController<ChatStreamEvent>();
+        when(() => mock.streamChat(
+              any(),
+              any(),
+              think: any(named: 'think'),
+              tools: any(named: 'tools'),
+              numCtx: any(named: 'numCtx'),
+            )).thenAnswer((_) => controller.stream);
+        when(() => mock.generateText(any(), any(), think: any(named: 'think')))
+            .thenAnswer((_) async => '');
+        p = ChatProvider(
+          storageService: storage,
+          initialConversations: [Conversation(id: 'old', model: 'llama3')],
+        );
+        p.setService(mock);
+        other = p.createConversation('llama3');
+        streaming = p.createConversation('llama3');
+        savedWith.clear(); // creating the chats saved in full
+      });
+
+      tearDown(() {
+        p.dispose();
+      });
+
+      // testWidgets for its fake clock: pump() fires the 1 s persist timer.
+      testWidgets('the timer saves only the conversation being generated',
+          (tester) async {
+        final send = p.sendMessage('hi');
+        await tester.pump();
+        controller.add(const ChatStreamEvent(contentToken: 'a'));
+        await tester.pump(const Duration(seconds: 1));
+
+        expect(savedWith, hasLength(1));
+        expect(savedWith.single, {streaming.id});
+
+        controller.add(const ChatStreamEvent(contentToken: 'b'));
+        await tester.pump(const Duration(seconds: 1));
+
+        expect(savedWith, hasLength(2));
+        expect(savedWith.last, {streaming.id});
+        expect(savedWith.last, isNot(contains(other.id)));
+
+        controller.add(const ChatStreamEvent(done: true));
+        await controller.close();
+        await send;
+      });
+
+      testWidgets('the save that ends the exchange is a full one',
+          (tester) async {
+        final send = p.sendMessage('hi');
+        await tester.pump();
+        controller.add(const ChatStreamEvent(contentToken: 'a'));
+        await tester.pump(const Duration(seconds: 1));
+        savedWith.clear();
+
+        controller.add(const ChatStreamEvent(done: true));
+        await controller.close();
+        await send;
+
+        // anything else that changed meanwhile is written promptly
+        expect(savedWith, [null]);
+        // and the timer is gone: no more partial saves afterwards
+        await tester.pump(const Duration(seconds: 3));
+        expect(savedWith, [null]);
+      });
+
+      testWidgets('a failed exchange also ends with a full save',
+          (tester) async {
+        final send = p.sendMessage('hi');
+        await tester.pump();
+        controller.add(const ChatStreamEvent(contentToken: 'a'));
+        await tester.pump(const Duration(seconds: 1));
+        savedWith.clear();
+
+        controller.addError(Exception('Connection closed'));
+        await controller.close();
+        await send;
+
+        expect(savedWith, [null]);
+      });
+
+      testWidgets('edits made while streaming are saved in full',
+          (tester) async {
+        final send = p.sendMessage('hi');
+        await tester.pump();
+        savedWith.clear();
+
+        p.renameConversation(other.id, 'Renamed mid-stream');
+
+        expect(savedWith, [null]);
+
+        controller.add(const ChatStreamEvent(done: true));
+        await controller.close();
+        await send;
+      });
+
+      testWidgets('each exchange keys the timer to its own conversation',
+          (tester) async {
+        var send = p.sendMessage('first');
+        await tester.pump();
+        controller.add(const ChatStreamEvent(done: true));
+        await controller.close();
+        await send;
+
+        // second exchange in the other chat, with a fresh stream
+        controller = StreamController<ChatStreamEvent>();
+        p.setActiveConversation(other);
+        savedWith.clear();
+        send = p.sendMessage('second');
+        await tester.pump();
+        await tester.pump(const Duration(seconds: 1));
+
+        expect(savedWith, [
+          {other.id},
+        ]);
+
+        controller.add(const ChatStreamEvent(done: true));
+        await controller.close();
+        await send;
+      });
+    });
+
     group('save failures', () {
       Future<List<Object>> uncaughtErrorsFrom(
           MockStorageService storage) async {

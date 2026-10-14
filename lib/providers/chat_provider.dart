@@ -299,7 +299,7 @@ class ChatProvider extends ChangeNotifier with WidgetsBindingObserver {
       tools = [_webSearchToolDefinition()];
     }
 
-    _startPersistTimer();
+    _startPersistTimer(conv);
 
     // Tool-calling loop: may iterate if model requests tool calls
     for (var leg = 0; leg < _maxLegs; leg++) {
@@ -912,10 +912,13 @@ class ChatProvider extends ChangeNotifier with WidgetsBindingObserver {
     super.dispose();
   }
 
-  void _startPersistTimer() {
+  /// While [conv] streams, only it changes — so the periodic save re-encodes
+  /// just that conversation instead of the whole history. Every other save
+  /// (including the one ending the exchange) is a full one.
+  void _startPersistTimer(Conversation conv) {
     if (_persistTimer != null) return;
     _persistTimer = Timer.periodic(const Duration(seconds: 1), (_) {
-      _persist();
+      _persist(changed: {conv.id});
     });
   }
 
@@ -924,9 +927,15 @@ class ChatProvider extends ChangeNotifier with WidgetsBindingObserver {
     _persistTimer = null;
   }
 
-  Future<void> _persist() async {
+  /// Saves to disk. With [changed], only those conversations are re-encoded
+  /// (see [StorageService.saveConversations]); without it, all of them are.
+  Future<void> _persist({Set<String>? changed}) async {
+    final storage = _storageService;
+    if (storage == null) return;
     try {
-      await _storageService?.saveConversations(_conversations);
+      await (changed == null
+          ? storage.saveConversations(_conversations)
+          : storage.saveConversations(_conversations, changed: changed));
     } catch (e) {
       // Callers fire and forget, so a failed save (disk full, unwritable
       // path) would otherwise be an unhandled async error — once per second
