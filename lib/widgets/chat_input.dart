@@ -30,13 +30,21 @@ Future<T?> guardPicker<T>(
 
 enum PickedFileStatus { cancelled, unreadable, ok }
 
+/// Reads a picked file's bytes; null when it can't be read (revoked access,
+/// vanished file).
+Future<Uint8List?> readPickedFile(PlatformFile file) async {
+  try {
+    return await file.readAsBytes();
+  } on Exception {
+    return null;
+  }
+}
+
 /// Tells a cancelled file picker (silent) apart from a chosen file whose
 /// bytes could not be read (worth telling the user about).
-PickedFileStatus classifyPickedFile(FilePickerResult? result) {
-  if (result == null || result.files.isEmpty) return PickedFileStatus.cancelled;
-  return result.files.first.bytes == null
-      ? PickedFileStatus.unreadable
-      : PickedFileStatus.ok;
+PickedFileStatus classifyPickedFile(PlatformFile? file, Uint8List? bytes) {
+  if (file == null) return PickedFileStatus.cancelled;
+  return bytes == null ? PickedFileStatus.unreadable : PickedFileStatus.ok;
 }
 
 class ChatInput extends StatefulWidget {
@@ -450,12 +458,13 @@ class _ChatInputState extends State<ChatInput> {
     final messenger = ScaffoldMessenger.of(context);
     final conversation = chatProvider.activeConversation;
 
-    final result = await guardPicker<FilePickerResult?>(
+    final picked = await guardPicker<PlatformFile?>(
       messenger,
       "Couldn't open the file picker.",
-      () => FilePicker.pickFiles(withData: true),
+      () => FilePicker.pickFile(),
     );
-    switch (classifyPickedFile(result)) {
+    final pickedBytes = picked == null ? null : await readPickedFile(picked);
+    switch (classifyPickedFile(picked, pickedBytes)) {
       case PickedFileStatus.cancelled:
         return;
       case PickedFileStatus.unreadable:
@@ -468,7 +477,8 @@ class _ChatInputState extends State<ChatInput> {
       case PickedFileStatus.ok:
         break;
     }
-    final f = result!.files.first;
+    final f = picked!;
+    final bytes = pickedBytes!;
 
     if (_isImageExtension(f.extension)) {
       // Images go through Ollama's images field — vision models only.
@@ -487,7 +497,7 @@ class _ChatInputState extends State<ChatInput> {
       // Other files are inlined as text — reject binary formats the model
       // can't read (PDF, docx, executables, …).
       try {
-        utf8.decode(f.bytes!);
+        utf8.decode(bytes);
       } on FormatException {
         messenger
           ..clearSnackBars()
@@ -498,7 +508,7 @@ class _ChatInputState extends State<ChatInput> {
       }
     }
 
-    final encoded = base64Encode(f.bytes!);
+    final encoded = base64Encode(bytes);
     final mime = _mimeFromExtension(f.extension);
     chatProvider.setPendingFile(f.name, encoded, mime);
   }

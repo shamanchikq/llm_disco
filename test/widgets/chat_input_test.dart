@@ -26,6 +26,35 @@ class _UnreadableXFile extends XFile {
       Future.error(const FileSystemException('Permission denied'));
 }
 
+/// A file as the picker returns it: [read] stands in for the platform read,
+/// which fails for revoked access or a vanished file.
+base class _PickedFile extends PlatformFile {
+  _PickedFile(this.name, this.read);
+
+  final Future<Uint8List> Function() read;
+
+  @override
+  final String name;
+
+  @override
+  Uri get uri => Uri.file('/picked/$name');
+
+  @override
+  XFile get xFile => XFile(uri.toFilePath());
+
+  @override
+  int? lengthSync() => null;
+
+  @override
+  Future<int?> length() async => null;
+
+  @override
+  Future<Uint8List> readAsBytes() => read();
+
+  @override
+  Stream<Uint8List> readAsByteStream() => Stream.fromFuture(read());
+}
+
 // 1x1 PNG
 const _png =
     'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC';
@@ -299,20 +328,28 @@ void main() {
     });
 
     test('classifyPickedFile separates cancel from an unreadable file', () {
-      expect(classifyPickedFile(null), PickedFileStatus.cancelled);
-      expect(classifyPickedFile(FilePickerResult([])),
-          PickedFileStatus.cancelled);
+      final file = _PickedFile('notes.txt', () async => Uint8List(0));
+      expect(classifyPickedFile(null, null), PickedFileStatus.cancelled);
+      expect(classifyPickedFile(file, null), PickedFileStatus.unreadable);
       expect(
-        classifyPickedFile(FilePickerResult(
-            [PlatformFile(name: 'notes.txt', size: 12)])),
-        PickedFileStatus.unreadable,
+        classifyPickedFile(file, Uint8List.fromList([104, 105])),
+        PickedFileStatus.ok,
+      );
+    });
+
+    test('readPickedFile returns the bytes, or null when they cannot be read',
+        () async {
+      final bytes = Uint8List.fromList([104, 105]);
+      expect(
+        await readPickedFile(_PickedFile('notes.txt', () async => bytes)),
+        bytes,
       );
       expect(
-        classifyPickedFile(FilePickerResult([
-          PlatformFile(
-              name: 'notes.txt', size: 2, bytes: Uint8List.fromList([104, 105])),
-        ])),
-        PickedFileStatus.ok,
+        await readPickedFile(_PickedFile(
+          'notes.txt',
+          () => Future.error(const FileSystemException('Permission denied')),
+        )),
+        isNull,
       );
     });
   });

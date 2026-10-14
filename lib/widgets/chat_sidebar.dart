@@ -533,7 +533,8 @@ class _ChatSidebarState extends State<ChatSidebar> {
                 try {
                   final file = await storage
                       .exportAllConversations(chatProvider.conversations);
-                  await Share.shareXFiles([XFile(file.path)]);
+                  await SharePlus.instance
+                      .share(ShareParams(files: [XFile(file.path)]));
                 } catch (e) {
                   messenger.showSnackBar(
                       SnackBar(content: Text('Export failed: $e')));
@@ -547,11 +548,11 @@ class _ChatSidebarState extends State<ChatSidebar> {
                 final messenger = ScaffoldMessenger.of(context);
                 _closeSheetAndDrawer(ctx, context);
                 try {
-                  final result = await FilePicker.pickFiles(
+                  final picked = await FilePicker.pickFile(
                     type: FileType.custom,
                     allowedExtensions: ['json'],
                   );
-                  final path = result?.files.single.path;
+                  final path = picked?.path;
                   if (path == null) return;
                   final imported = await storage.importConversations(path);
                   final added = chatProvider.importConversations(imported);
@@ -635,7 +636,8 @@ class _ChatSidebarState extends State<ChatSidebar> {
                 try {
                   final file =
                       await storage.exportConversationMarkdown(conversation);
-                  await Share.shareXFiles([XFile(file.path)]);
+                  await SharePlus.instance
+                      .share(ShareParams(files: [XFile(file.path)]));
                 } catch (e) {
                   messenger.showSnackBar(
                       SnackBar(content: Text('Export failed: $e')));
@@ -651,7 +653,8 @@ class _ChatSidebarState extends State<ChatSidebar> {
                 try {
                   final file =
                       await storage.exportConversation(conversation);
-                  await Share.shareXFiles([XFile(file.path)]);
+                  await SharePlus.instance
+                      .share(ShareParams(files: [XFile(file.path)]));
                 } catch (e) {
                   messenger.showSnackBar(
                       SnackBar(content: Text('Export failed: $e')));

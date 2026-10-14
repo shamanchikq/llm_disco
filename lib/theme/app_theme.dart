@@ -185,8 +185,31 @@ class AppTheme {
         fontStyle: fontStyle,
       );
 
+  /// Hanken Grotesk applied to every slot of [base]. google_fonts 9 builds
+  /// its `hankenGroteskTextTheme()` on `package:material_ui`, whose
+  /// `TextTheme` is a different type from the one `ThemeData` takes, so this
+  /// does what that helper does internally, slot by slot.
+  static TextTheme _hankenGroteskTextTheme(TextTheme base) => TextTheme(
+        displayLarge: GoogleFonts.hankenGrotesk(textStyle: base.displayLarge),
+        displayMedium: GoogleFonts.hankenGrotesk(textStyle: base.displayMedium),
+        displaySmall: GoogleFonts.hankenGrotesk(textStyle: base.displaySmall),
+        headlineLarge: GoogleFonts.hankenGrotesk(textStyle: base.headlineLarge),
+        headlineMedium:
+            GoogleFonts.hankenGrotesk(textStyle: base.headlineMedium),
+        headlineSmall: GoogleFonts.hankenGrotesk(textStyle: base.headlineSmall),
+        titleLarge: GoogleFonts.hankenGrotesk(textStyle: base.titleLarge),
+        titleMedium: GoogleFonts.hankenGrotesk(textStyle: base.titleMedium),
+        titleSmall: GoogleFonts.hankenGrotesk(textStyle: base.titleSmall),
+        bodyLarge: GoogleFonts.hankenGrotesk(textStyle: base.bodyLarge),
+        bodyMedium: GoogleFonts.hankenGrotesk(textStyle: base.bodyMedium),
+        bodySmall: GoogleFonts.hankenGrotesk(textStyle: base.bodySmall),
+        labelLarge: GoogleFonts.hankenGrotesk(textStyle: base.labelLarge),
+        labelMedium: GoogleFonts.hankenGrotesk(textStyle: base.labelMedium),
+        labelSmall: GoogleFonts.hankenGrotesk(textStyle: base.labelSmall),
+      );
+
   static ThemeData get dark {
-    final baseText = GoogleFonts.hankenGroteskTextTheme(
+    final baseText = _hankenGroteskTextTheme(
       ThemeData(brightness: Brightness.dark).textTheme,
     ).apply(bodyColor: _text, displayColor: _text);
 
