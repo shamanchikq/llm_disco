@@ -1,4 +1,6 @@
 import 'dart:async';
+import 'dart:convert';
+import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mocktail/mocktail.dart';
@@ -667,6 +669,337 @@ void main() {
         expect(conv.messages.last.role, 'assistant');
         expect(conv.messages.last.isError, isTrue);
         expect(conv.messages.last.content, contains('Connection closed'));
+      });
+    });
+
+    group('truncated replies', () {
+      late MockOllamaService mock;
+      late Conversation conv;
+
+      setUp(() {
+        mock = MockOllamaService();
+        provider.setService(mock);
+        conv = provider.createConversation('llama3');
+        when(() => mock.generateText(any(), any(), think: any(named: 'think')))
+            .thenAnswer((_) async => '');
+      });
+
+      void stubStream(Stream<ChatStreamEvent> Function() answer) {
+        when(() => mock.streamChat(
+              any(),
+              any(),
+              think: any(named: 'think'),
+              tools: any(named: 'tools'),
+              numCtx: any(named: 'numCtx'),
+            )).thenAnswer((_) => answer());
+      }
+
+      group('done_reason', () {
+        test('length flags the reply as cut off', () async {
+          stubStream(() => Stream.fromIterable([
+                const ChatStreamEvent(contentToken: 'Half an answer'),
+                const ChatStreamEvent(done: true, doneReason: 'length'),
+              ]));
+
+          await provider.sendMessage('hi');
+
+          final reply = conv.messages.last;
+          expect(reply.cutOff, isTrue);
+          // the text itself is untouched and it isn't an error
+          expect(reply.content, 'Half an answer');
+          expect(reply.isError, isFalse);
+        });
+
+        test('stop leaves the reply unflagged', () async {
+          stubStream(() => Stream.fromIterable([
+                const ChatStreamEvent(contentToken: 'All of it'),
+                const ChatStreamEvent(done: true, doneReason: 'stop'),
+              ]));
+
+          await provider.sendMessage('hi');
+
+          expect(conv.messages.last.cutOff, isFalse);
+        });
+
+        test('a done line without a reason leaves the reply unflagged',
+            () async {
+          stubStream(() => Stream.fromIterable([
+                const ChatStreamEvent(contentToken: 'All of it', done: true),
+              ]));
+
+          await provider.sendMessage('hi');
+
+          expect(conv.messages.last.cutOff, isFalse);
+        });
+
+        test('length with only thinking and no answer is still flagged',
+            () async {
+          // A thinking model that spends its whole budget reasoning: the flag
+          // is what explains the missing answer.
+          stubStream(() => Stream.fromIterable([
+                const ChatStreamEvent(thinkingToken: 'Let me think'),
+                const ChatStreamEvent(thinkingToken: ' some more'),
+                const ChatStreamEvent(done: true, doneReason: 'length'),
+              ]));
+
+          await provider.sendMessage('hi');
+
+          final reply = conv.messages.last;
+          expect(reply.cutOff, isTrue);
+          expect(reply.content, isEmpty);
+          expect(reply.thinking, 'Let me think some more');
+          expect(reply.isError, isFalse);
+        });
+
+        test('the flag is set on the leg that was cut off, not the others',
+            () async {
+          provider.setSearxngUrl('http://searx.local');
+          conv.webSearchEnabled = true;
+          when(() => mock.searchSearXNG(any(), any())).thenAnswer((_) async => [
+                {'title': 't', 'url': 'u', 'content': 'c'},
+              ]);
+          var leg = 0;
+          stubStream(() {
+            leg++;
+            if (leg == 1) {
+              return Stream.fromIterable([
+                ChatStreamEvent(
+                    toolCalls: [searchCall('dart')],
+                    done: true,
+                    doneReason: 'stop'),
+              ]);
+            }
+            return Stream.fromIterable([
+              const ChatStreamEvent(contentToken: 'Cut sh'),
+              const ChatStreamEvent(done: true, doneReason: 'length'),
+            ]);
+          });
+
+          await provider.sendMessage('question');
+
+          final assistants =
+              conv.messages.where((m) => m.role == 'assistant').toList();
+          expect(assistants, hasLength(2));
+          expect(assistants.first.cutOff, isFalse);
+          expect(assistants.last.cutOff, isTrue);
+        });
+
+        test('a retry that completes clears the flag with the old reply',
+            () async {
+          var reason = 'length';
+          stubStream(() => Stream.fromIterable([
+                const ChatStreamEvent(contentToken: 'text'),
+                ChatStreamEvent(done: true, doneReason: reason),
+              ]));
+          await provider.sendMessage('hi');
+          expect(conv.messages.last.cutOff, isTrue);
+
+          reason = 'stop';
+          await provider.retryLastMessage();
+
+          expect(conv.messages.where((m) => m.role == 'assistant'),
+              hasLength(1));
+          expect(conv.messages.last.cutOff, isFalse);
+        });
+      });
+
+      group('a stream that closes before it finished', () {
+        // What OllamaService throws when the response ends without a
+        // `done: true` line.
+        Exception closedEarly() =>
+            Exception('Connection closed before the reply finished');
+
+        test('keeps the partial text, labelled as interrupted', () async {
+          stubStream(() async* {
+            yield const ChatStreamEvent(contentToken: 'Half an ');
+            yield const ChatStreamEvent(contentToken: 'answer');
+            throw closedEarly();
+          });
+
+          await provider.sendMessage('hi');
+
+          final reply = conv.messages.last;
+          expect(reply.role, 'assistant');
+          expect(reply.content, 'Half an answer\n\n*[Response interrupted]*');
+          expect(reply.isError, isFalse);
+          expect(provider.isAnyStreaming, isFalse);
+        });
+
+        test('keeps partial text that arrived after thinking', () async {
+          stubStream(() async* {
+            yield const ChatStreamEvent(thinkingToken: 'hmm');
+            yield const ChatStreamEvent(contentToken: 'Half');
+            throw closedEarly();
+          });
+
+          await provider.sendMessage('hi');
+
+          final reply = conv.messages.last;
+          expect(reply.content, 'Half\n\n*[Response interrupted]*');
+          expect(reply.thinking, 'hmm');
+          expect(reply.isError, isFalse);
+        });
+
+        test('with nothing received it is an error bubble you can retry',
+            () async {
+          stubStream(() async* {
+            throw closedEarly();
+          });
+
+          await provider.sendMessage('hi');
+
+          final reply = conv.messages.last;
+          expect(reply.isError, isTrue);
+          expect(reply.content, contains('Connection closed before'));
+          expect(conv.messages.length, 2);
+        });
+
+        test('is not flagged as cut off', () async {
+          stubStream(() async* {
+            yield const ChatStreamEvent(contentToken: 'Half');
+            throw closedEarly();
+          });
+
+          await provider.sendMessage('hi');
+
+          expect(conv.messages.last.cutOff, isFalse);
+        });
+
+        test('after a user stop it still renders as a stop, not an error',
+            () async {
+          // The stop closes the client; if that ever surfaces as a clean
+          // close, the service reports it with the same exception — the
+          // exchange's own cancelled flag decides how it reads.
+          final controller = StreamController<ChatStreamEvent>();
+          when(() => mock.cancelStream()).thenAnswer((_) {});
+          stubStream(() => controller.stream);
+
+          final send = provider.sendMessage('hi');
+          await Future<void>.delayed(Duration.zero);
+          controller.add(const ChatStreamEvent(contentToken: 'Hello'));
+          await Future<void>.delayed(Duration.zero);
+          provider.stopStreaming();
+          controller.addError(closedEarly());
+          await controller.close();
+          await send;
+
+          final reply = conv.messages.last;
+          expect(reply.content, 'Hello\n\n*[Response interrupted]*');
+          expect(reply.isError, isFalse);
+        });
+
+        test('a stop before any output removes the bubble without an error',
+            () async {
+          final controller = StreamController<ChatStreamEvent>();
+          when(() => mock.cancelStream()).thenAnswer((_) {});
+          stubStream(() => controller.stream);
+
+          final send = provider.sendMessage('hi');
+          await Future<void>.delayed(Duration.zero);
+          provider.stopStreaming();
+          controller.addError(closedEarly());
+          await controller.close();
+          await send;
+
+          expect(conv.messages.map((m) => m.role), ['user']);
+        });
+      });
+
+      // The same flows with the real OllamaService against a local server,
+      // so the cut is produced by actual HTTP behaviour instead of a mock
+      // that is told what to throw.
+      group('against a real server', () {
+        late HttpServer server;
+        late ChatProvider real;
+        late Conversation realConv;
+
+        late HttpOverrides? previousOverrides;
+
+        setUp(() {
+          // flutter_test answers every HTTP request with a 400 by default.
+          previousOverrides = HttpOverrides.current;
+          HttpOverrides.global = null;
+        });
+
+        tearDown(() {
+          HttpOverrides.global = previousOverrides;
+        });
+
+        Future<void> serve(void Function(HttpRequest) handler) async {
+          server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+          server.listen(handler);
+          addTearDown(() => server.close(force: true));
+          real = ChatProvider();
+          addTearDown(real.dispose);
+          real.setService(OllamaService('http://127.0.0.1:${server.port}'));
+          realConv = real.createConversation('llama3');
+        }
+
+        String line(Map<String, dynamic> json) => '${jsonEncode(json)}\n';
+
+        Map<String, dynamic> token(String text) => {
+              'message': {'role': 'assistant', 'content': text},
+              'done': false,
+            };
+
+        test('a clean close without a done line is shown as interrupted',
+            () async {
+          await serve((req) {
+            req.response
+              ..write(line(token('Half an ')))
+              ..write(line(token('answer')));
+            req.response.close(); // ends cleanly, no done line
+          });
+
+          await real.sendMessage('hi');
+
+          final reply = realConv.messages.last;
+          expect(reply.content, 'Half an answer\n\n*[Response interrupted]*');
+          expect(reply.isError, isFalse);
+        });
+
+        test('a complete reply is untouched and length is flagged', () async {
+          await serve((req) {
+            req.response
+              ..write(line(token('Cut ')))
+              ..write(line({
+                'message': {'role': 'assistant', 'content': 'off'},
+                'done': true,
+                'done_reason': 'length',
+              }));
+            req.response.close();
+          });
+
+          await real.sendMessage('hi');
+
+          final reply = realConv.messages.last;
+          expect(reply.content, 'Cut off');
+          expect(reply.cutOff, isTrue);
+          expect(reply.isError, isFalse);
+        });
+
+        test('a user stop mid-reply renders as a stop', () async {
+          await serve((req) async {
+            req.response.bufferOutput = false;
+            req.response.write(line(token('Hello')));
+            await req.response.flush();
+            // never finishes on its own
+          });
+
+          final send = real.sendMessage('hi');
+          // wait until the first token reached the bubble
+          while (realConv.messages.length < 2 ||
+              realConv.messages.last.content.isEmpty) {
+            await Future<void>.delayed(const Duration(milliseconds: 10));
+          }
+          real.stopStreaming();
+          await send.timeout(const Duration(seconds: 5));
+
+          final reply = realConv.messages.last;
+          expect(reply.content, 'Hello\n\n*[Response interrupted]*');
+          expect(reply.isError, isFalse);
+          expect(real.isAnyStreaming, isFalse);
+        });
       });
     });
 

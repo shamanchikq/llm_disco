@@ -10,6 +10,10 @@ class ChatStreamEvent {
   final String? thinkingToken;
   final List<Map<String, dynamic>>? toolCalls;
   final bool done;
+
+  /// Why generation ended, from the done line's `done_reason` ("stop",
+  /// "length", "load", "unload"). Null on every non-final event.
+  final String? doneReason;
   final int? evalCount;
   final int? evalDuration;
   final int? promptEvalCount;
@@ -19,6 +23,7 @@ class ChatStreamEvent {
     this.thinkingToken,
     this.toolCalls,
     this.done = false,
+    this.doneReason,
     this.evalCount,
     this.evalDuration,
     this.promptEvalCount,
@@ -128,6 +133,11 @@ class OllamaService {
         throw Exception('HTTP ${response.statusCode}: $responseBody');
       }
 
+      // Ollama always ends a streamed chat with a `done: true` line. A stream
+      // that closes without one was cut short (proxy timeout, dropped
+      // connection) and must not pass for a finished reply.
+      var sawDone = false;
+
       await for (final chunk in response.stream
           .transform(utf8.decoder)
           .transform(const LineSplitter())) {
@@ -150,7 +160,11 @@ class OllamaService {
 
         final message = json['message'] as Map<String, dynamic>?;
         final isDone = json['done'] as bool? ?? false;
+        if (isDone) sawDone = true;
 
+        final doneReason = isDone && json['done_reason'] is String
+            ? json['done_reason'] as String
+            : null;
         final evalCount = isDone ? json['eval_count'] as int? : null;
         final evalDuration = isDone ? json['eval_duration'] as int? : null;
         final promptEvalCount =
@@ -175,6 +189,7 @@ class OllamaService {
                 : null,
             toolCalls: parsedToolCalls,
             done: isDone,
+            doneReason: doneReason,
             evalCount: evalCount,
             evalDuration: evalDuration,
             promptEvalCount: promptEvalCount,
@@ -182,11 +197,16 @@ class OllamaService {
         } else if (isDone) {
           yield ChatStreamEvent(
             done: true,
+            doneReason: doneReason,
             evalCount: evalCount,
             evalDuration: evalDuration,
             promptEvalCount: promptEvalCount,
           );
         }
+      }
+
+      if (!sawDone) {
+        throw Exception('Connection closed before the reply finished');
       }
     } finally {
       _activeClient?.close();

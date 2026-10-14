@@ -375,6 +375,12 @@ class ChatProvider extends ChangeNotifier with WidgetsBindingObserver {
               (event.promptEvalCount ?? 0) + (event.evalCount ?? 0);
           notifyListeners();
         }
+        // Hit the output limit: flagged even when nothing but reasoning
+        // arrived, so the bubble can say why there is no (or half an) answer.
+        if (event.done && event.doneReason == 'length') {
+          assistantMessage.cutOff = true;
+          notifyListeners();
+        }
       }
 
       // No tool calls (or none honoured on the tool-less last leg): the

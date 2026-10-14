@@ -90,6 +90,169 @@ void main() {
             e.toString().contains('model requires more system memory'))),
       );
     });
+
+    group('truncated streams', () {
+      Future<OllamaService> serveLines(List<Object> lines) async {
+        final server = await _serve((req) {
+          for (final line in lines) {
+            req.response.write('${jsonEncode(line)}\n');
+          }
+          req.response.close();
+        });
+        addTearDown(() => server.close(force: true));
+        return OllamaService('http://127.0.0.1:${server.port}');
+      }
+
+      final hi = [ChatMessage(role: 'user', content: 'hi')];
+      Matcher closedEarly() => throwsA(predicate((e) =>
+          e.toString().contains('Connection closed before the reply finished')));
+
+      test('a stream that ends without a done line throws', () async {
+        // A proxy timeout or dropped connection can close the response
+        // cleanly mid-answer; that must not read as a finished reply.
+        final service = await serveLines([
+          {
+            'message': {'role': 'assistant', 'content': 'Half an ans'},
+            'done': false,
+          },
+        ]);
+
+        await expectLater(service.streamChat('m', hi).toList(), closedEarly());
+      });
+
+      test('the partial output still arrives before the error', () async {
+        final service = await serveLines([
+          {
+            'message': {'role': 'assistant', 'content': 'Half an ans'},
+            'done': false,
+          },
+        ]);
+
+        final tokens = <String>[];
+        await expectLater(
+          service.streamChat('m', hi).forEach((e) {
+            if (e.contentToken != null) tokens.add(e.contentToken!);
+          }),
+          closedEarly(),
+        );
+        expect(tokens, ['Half an ans']);
+      });
+
+      test('an empty response body throws', () async {
+        final service = await serveLines([]);
+
+        await expectLater(service.streamChat('m', hi).toList(), closedEarly());
+      });
+
+      test('cancelStream still ends an in-flight chat with an error', () async {
+        // ChatProvider treats the exchange it cancelled as a user stop; the
+        // stream must end promptly instead of hanging or completing.
+        final server = await _serve((req) async {
+          req.response.bufferOutput = false;
+          req.response.write('${jsonEncode({
+                'message': {'role': 'assistant', 'content': 'Hel'},
+                'done': false,
+              })}\n');
+          await req.response.flush();
+          // Never finishes on its own.
+        });
+        addTearDown(() => server.close(force: true));
+        final service = OllamaService('http://127.0.0.1:${server.port}');
+
+        final first = Completer<void>();
+        final outcome = Completer<Object?>();
+        service.streamChat('m', hi).listen(
+          (_) {
+            if (!first.isCompleted) first.complete();
+          },
+          onError: (Object e) {
+            if (!outcome.isCompleted) outcome.complete(e);
+          },
+          onDone: () {
+            if (!outcome.isCompleted) outcome.complete(null);
+          },
+        );
+
+        await first.future;
+        service.cancelStream();
+
+        expect(await outcome.future.timeout(const Duration(seconds: 5)),
+            isNotNull);
+      });
+
+      test('a bare done line without a message completes the stream',
+          () async {
+        final service = await serveLines([
+          {
+            'message': {'role': 'assistant', 'content': 'ok'},
+            'done': false,
+          },
+          {'done': true, 'done_reason': 'stop'},
+        ]);
+
+        final events = await service.streamChat('m', hi).toList();
+
+        expect(events.last.done, isTrue);
+      });
+    });
+
+    group('done_reason', () {
+      Future<List<ChatStreamEvent>> run(Map<String, dynamic> doneLine) async {
+        final server = await _serve((req) {
+          req.response
+            ..write('${jsonEncode({
+                  'message': {'role': 'assistant', 'content': 'text'},
+                  'done': false,
+                  'done_reason': 'ignored-before-done',
+                })}\n')
+            ..write('${jsonEncode(doneLine)}\n');
+          req.response.close();
+        });
+        addTearDown(() => server.close(force: true));
+        final service = OllamaService('http://127.0.0.1:${server.port}');
+        return service
+            .streamChat('m', [ChatMessage(role: 'user', content: 'hi')])
+            .toList();
+      }
+
+      test('is parsed from a done line that carries a message', () async {
+        final events = await run({
+          'message': {'role': 'assistant', 'content': ''},
+          'done': true,
+          'done_reason': 'length',
+        });
+
+        expect(events.last.done, isTrue);
+        expect(events.last.doneReason, 'length');
+      });
+
+      test('is parsed from a bare done line', () async {
+        final events = await run({'done': true, 'done_reason': 'stop'});
+
+        expect(events.last.doneReason, 'stop');
+      });
+
+      test('is only read from the done line', () async {
+        final events = await run({'done': true, 'done_reason': 'stop'});
+
+        expect(events.first.done, isFalse);
+        expect(events.first.doneReason, isNull);
+      });
+
+      test('is null when the server does not send one', () async {
+        final events = await run({'done': true});
+
+        expect(events.last.doneReason, isNull);
+      });
+
+      test('a non-string value is ignored rather than failing the stream',
+          () async {
+        final events = await run({'done': true, 'done_reason': 7});
+
+        expect(events.last.done, isTrue);
+        expect(events.last.doneReason, isNull);
+      });
+    });
   });
 
   group('OllamaService auth header', () {
@@ -97,9 +260,12 @@ void main() {
       final seen = <String?>[];
       final server = await _serve((req) {
         seen.add(req.headers.value('authorization'));
+        // a chat stream has to end with a done line to count as complete
         req.response
           ..headers.contentType = ContentType.json
-          ..write(jsonEncode({'models': []}));
+          ..write(req.uri.path == '/api/chat'
+              ? '${jsonEncode({'done': true})}\n'
+              : jsonEncode({'models': []}));
         req.response.close();
       });
       addTearDown(() => server.close(force: true));
