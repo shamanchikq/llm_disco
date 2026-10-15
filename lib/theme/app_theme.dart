@@ -365,7 +365,9 @@ class AppTheme {
           shape: RoundedRectangleBorder(
             borderRadius: BorderRadius.circular(13),
           ),
-          textStyle: const TextStyle(fontSize: 15, fontWeight: FontWeight.w700),
+          // Component text styles replace the inherited one outright, so
+          // each must carry the family or it falls back to the system font.
+          textStyle: display(fontSize: 15, fontWeight: FontWeight.w700),
         ),
       ),
 
@@ -376,7 +378,7 @@ class AppTheme {
           shape: RoundedRectangleBorder(
             borderRadius: BorderRadius.circular(12),
           ),
-          textStyle: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
+          textStyle: display(fontSize: 14, fontWeight: FontWeight.w600),
         ),
       ),
 
@@ -405,7 +407,7 @@ class AppTheme {
           borderRadius: BorderRadius.circular(10),
         ),
         iconColor: _textMuted,
-        subtitleTextStyle: const TextStyle(color: _textMuted, fontSize: 13),
+        subtitleTextStyle: display(color: _textMuted, fontSize: 13),
       ),
 
       switchTheme: SwitchThemeData(
@@ -425,7 +427,7 @@ class AppTheme {
         backgroundColor: Colors.transparent,
         side: const BorderSide(color: _line),
         shape: const StadiumBorder(),
-        labelStyle: const TextStyle(color: _textMuted, fontSize: 12.5),
+        labelStyle: display(color: _textMuted, fontSize: 12.5),
         iconTheme: const IconThemeData(color: _textMuted, size: 15),
         selectedColor: _accentSoft,
         checkmarkColor: _accent,
