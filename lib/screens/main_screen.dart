@@ -10,6 +10,7 @@ import '../widgets/chat_input.dart';
 import '../widgets/chat_sidebar.dart';
 import '../widgets/message_bubble.dart';
 import '../widgets/model_selector.dart';
+import '../widgets/tap_target.dart';
 
 /// A parsed Chat-settings field. [value] is null for an empty field ("use
 /// the default"); [error] is set when the text can't be accepted.
@@ -148,16 +149,25 @@ class _MainScreenState extends State<MainScreen> {
       appBar: AppBar(
         leading: IconButton(
           icon: const Icon(Icons.menu),
+          tooltip: MaterialLocalizations.of(context).openAppDrawerTooltip,
           onPressed: () => _scaffoldKey.currentState?.openDrawer(),
         ),
         titleSpacing: 0,
+        // The title and the model line are two touch targets stacked inside
+        // a 56 dp bar, so neither can reach 48 dp: they split the bar
+        // between them (31 + 25 dp) and span the whole title width, with the
+        // text left exactly where it was.
         title: hasConversation
             ? Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  GestureDetector(
-                    behavior: HitTestBehavior.opaque,
+                  TapTarget(
+                    label: 'Rename chat',
+                    value: conversationTitle,
+                    minWidth: 0,
+                    minHeight: 31,
+                    alignment: Alignment.bottomLeft,
                     onTap: () {
                       final conv =
                           context.read<ChatProvider>().activeConversation;
@@ -171,43 +181,49 @@ class _MainScreenState extends State<MainScreen> {
                       overflow: TextOverflow.ellipsis,
                     ),
                   ),
-                  const SizedBox(height: 1),
-                  GestureDetector(
-                    behavior: HitTestBehavior.opaque,
+                  TapTarget(
+                    label: 'Switch model',
+                    value: conversationModel,
+                    minWidth: 0,
+                    minHeight: 25,
+                    alignment: Alignment.topLeft,
                     onTap: () {
                       final conv =
                           context.read<ChatProvider>().activeConversation;
                       if (conv != null) _showModelPicker(context, conv);
                     },
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Container(
-                          width: 6,
-                          height: 6,
-                          decoration: BoxDecoration(
-                            color: tokens.good,
-                            shape: BoxShape.circle,
-                          ),
-                        ),
-                        const SizedBox(width: 6),
-                        Flexible(
-                          child: Text(
-                            conversationModel!,
-                            style: AppTheme.mono(
-                              fontSize: 11,
-                              color: tokens.textMuted,
+                    child: Padding(
+                      padding: const EdgeInsets.only(top: 1),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Container(
+                            width: 6,
+                            height: 6,
+                            decoration: BoxDecoration(
+                              color: tokens.good,
+                              shape: BoxShape.circle,
                             ),
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
                           ),
-                        ),
-                        Icon(
-                          Icons.expand_more_rounded,
-                          size: 13,
-                          color: tokens.textFaint,
-                        ),
-                      ],
+                          const SizedBox(width: 6),
+                          Flexible(
+                            child: Text(
+                              conversationModel!,
+                              style: AppTheme.mono(
+                                fontSize: 11,
+                                color: tokens.textMuted,
+                              ),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ),
+                          Icon(
+                            Icons.expand_more_rounded,
+                            size: 13,
+                            color: tokens.textFaint,
+                          ),
+                        ],
+                      ),
                     ),
                   ),
                 ],
@@ -215,7 +231,11 @@ class _MainScreenState extends State<MainScreen> {
             : const Text('LLM Disco'),
         actions: [
           if (hasConversation)
-            GestureDetector(
+            TapTarget(
+              label: 'Chat settings',
+              value: conversationCtx == null && conversationCtxUsed == null
+                  ? null
+                  : _ctxLabel(conversationCtx, conversationCtxUsed),
               onTap: () {
                 final conv =
                     context.read<ChatProvider>().activeConversation;
@@ -623,7 +643,6 @@ class _ChatBodyState extends State<_ChatBody> {
                             for (final (label, template) in _starters)
                               ActionChip(
                                 label: Text(label),
-                                visualDensity: VisualDensity.compact,
                                 onPressed: () => context
                                     .read<ChatProvider>()
                                     .setDraft(template),
@@ -737,30 +756,31 @@ class _ChatBodyState extends State<_ChatBody> {
                           );
                         },
                       ),
-                      // Jump back to the newest message after scrolling up
+                      // Jump back to the newest message after scrolling up.
+                      // A 36 dp circle in a 48 dp touch target, hence the
+                      // smaller offsets.
                       if (_showJumpToLatest)
                         Positioned(
-                          right: 16,
-                          bottom: 12,
-                          child: Material(
-                            color: colors.surfaceContainerHigh,
-                            shape: CircleBorder(
-                              side: BorderSide(color: tokens.lineStrong),
+                          right: 10,
+                          bottom: 6,
+                          child: IconButton(
+                            tooltip: 'Jump to latest message',
+                            iconSize: 18,
+                            icon: Icon(Icons.arrow_downward_rounded,
+                                color: colors.primary),
+                            onPressed: () => _scrollController.animateTo(
+                              0,
+                              duration: const Duration(milliseconds: 250),
+                              curve: Curves.easeOut,
                             ),
-                            child: InkWell(
-                              customBorder: const CircleBorder(),
-                              onTap: () => _scrollController.animateTo(
-                                0,
-                                duration: const Duration(milliseconds: 250),
-                                curve: Curves.easeOut,
-                              ),
-                              child: Padding(
-                                padding: const EdgeInsets.all(9),
-                                child: Icon(
-                                  Icons.arrow_downward_rounded,
-                                  size: 18,
-                                  color: colors.primary,
-                                ),
+                            style: IconButton.styleFrom(
+                              fixedSize: const Size.square(36),
+                              minimumSize: const Size.square(36),
+                              padding: EdgeInsets.zero,
+                              tapTargetSize: MaterialTapTargetSize.padded,
+                              backgroundColor: colors.surfaceContainerHigh,
+                              shape: CircleBorder(
+                                side: BorderSide(color: tokens.lineStrong),
                               ),
                             ),
                           ),

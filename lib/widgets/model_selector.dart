@@ -5,6 +5,7 @@ import '../providers/chat_provider.dart';
 import '../providers/connection_provider.dart';
 import '../providers/model_provider.dart';
 import '../theme/app_theme.dart';
+import 'tap_target.dart';
 
 /// Graphite bottom-sheet model picker shared by the sidebar footer and the
 /// app bar's mid-chat model switcher. Shows capability badges for models
@@ -156,41 +157,46 @@ class ModelSelector extends StatelessWidget {
     return Material(
       color: colors.surfaceContainerHigh,
       borderRadius: BorderRadius.circular(compact ? 10 : 12),
-      child: InkWell(
-        borderRadius: BorderRadius.circular(compact ? 10 : 12),
-        onTap: () {
-          final connectionProvider = context.read<ConnectionProvider>();
-          final provider = context.read<ModelProvider>();
-          showModelPickerSheet(
-            context,
-            current: provider.selectedModel,
-            onSelected: (m) =>
-                provider.selectModel(m, service: connectionProvider.service),
-          );
-        },
-        child: Padding(
-          padding: compact
-              ? const EdgeInsets.symmetric(horizontal: 10, vertical: 8)
-              : const EdgeInsets.symmetric(horizontal: 12, vertical: 11),
-          child: Row(
-            children: [
-              Expanded(
-                child: Text(
-                  modelProvider.selectedModel ?? '',
-                  style: AppTheme.mono(
-                    fontSize: compact ? 12 : 13,
-                    color: colors.onSurface,
+      child: Semantics(
+        button: true,
+        hint: 'Select model',
+        child: InkWell(
+          borderRadius: BorderRadius.circular(compact ? 10 : 12),
+          onTap: () {
+            final connectionProvider = context.read<ConnectionProvider>();
+            final provider = context.read<ModelProvider>();
+            showModelPickerSheet(
+              context,
+              current: provider.selectedModel,
+              onSelected: (m) =>
+                  provider.selectModel(m, service: connectionProvider.service),
+            );
+          },
+          child: Container(
+            // 48 dp touch height (the row was ~44).
+            constraints: const BoxConstraints(minHeight: kTapTargetSize),
+            alignment: Alignment.centerLeft,
+            padding: EdgeInsets.symmetric(horizontal: compact ? 10 : 12),
+            child: Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    modelProvider.selectedModel ?? '',
+                    style: AppTheme.mono(
+                      fontSize: compact ? 12 : 13,
+                      color: colors.onSurface,
+                    ),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
                   ),
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
                 ),
-              ),
-              Icon(
-                Icons.expand_more_rounded,
-                color: colors.primary,
-                size: compact ? 20 : 22,
-              ),
-            ],
+                Icon(
+                  Icons.expand_more_rounded,
+                  color: colors.primary,
+                  size: compact ? 20 : 22,
+                ),
+              ],
+            ),
           ),
         ),
       ),

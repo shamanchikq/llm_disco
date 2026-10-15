@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/semantics.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mocktail/mocktail.dart';
 import 'package:provider/provider.dart';
@@ -51,6 +52,44 @@ Future<ModelProvider> _modelsWith(
   await tester.pump();
   return models;
 }
+
+/// `androidTapTargetGuideline`'s check at another [size], minus the nodes
+/// [skip] names and read-only text fields (selectable message text carries a
+/// long-press to start selecting, but it is content, not a control).
+/// Exemptions are spelled out in each test so a control can't drop out of
+/// the check unnoticed.
+class _TapTargets extends MinimumTapTargetGuideline {
+  _TapTargets(Size size, {required this.skip})
+      : super(
+          size: size,
+          link: 'https://support.google.com/accessibility/android/answer/7101858',
+        );
+
+  final bool Function(SemanticsData data) skip;
+
+  @override
+  bool shouldSkipNode(SemanticsNode node) {
+    final data = node.getSemanticsData();
+    final flags = data.flagsCollection;
+    return super.shouldSkipNode(node) ||
+        (flags.isTextField && flags.isReadOnly) ||
+        skip(data);
+  }
+}
+
+/// The two stacked app-bar labels: a 56 dp bar can't give both of them 48 dp
+/// (or even 40), so they split it (31 + 25 dp) and are checked separately.
+bool _isTitleBlock(SemanticsData d) =>
+    d.label == 'Rename chat' || d.label == 'Switch model';
+
+/// What a screen reader (and the guideline) sees for [finder]: the control's
+/// whole touch region, not just the widget the finder lands on.
+Size _touchSize(WidgetTester tester, Finder finder) =>
+    tester.getSemantics(finder).rect.size;
+
+/// The Copy / Retry / Edit / Delete buttons under each message, sized 40 dp.
+bool _isMessageAction(SemanticsData d) =>
+    const {'Copy', 'Retry', 'Edit & resend', 'Delete'}.contains(d.tooltip);
 
 /// A service whose chat stream stays open until the test feeds/closes it.
 (MockOllamaService, StreamController<ChatStreamEvent>) _openService() {
@@ -539,6 +578,240 @@ void main() {
       // now there is an input to type in, and the button is gone
       expect(find.widgetWithText(FilledButton, 'New chat'), findsNothing);
       expect(find.byType(TextField), findsOneWidget);
+    });
+  });
+
+  group('accessibility', () {
+    /// A [testWidgets] with semantics switched on. The handle has to be
+    /// released inside the test body: the framework checks for leaked
+    /// handles before tear-downs run.
+    void testSemantics(
+        String description, Future<void> Function(WidgetTester) body) {
+      testWidgets(description, (tester) async {
+        final semantics = tester.ensureSemantics();
+        try {
+          await body(tester);
+        } finally {
+          semantics.dispose();
+        }
+      });
+    }
+
+    /// A 400 x 800 dp screen with everything a chat can show: both messages'
+    /// action rows, the vision / thinking / search controls, an attached image
+    /// and file, and unsent text in the composer.
+    Future<ChatProvider> pumpPopulated(WidgetTester tester,
+        {bool withMessages = true, int pairs = 1}) async {
+      tester.view.physicalSize = const Size(800, 1600);
+      tester.view.devicePixelRatio = 2;
+      addTearDown(tester.view.reset);
+
+      final models = ModelProvider();
+      final service = MockOllamaService();
+      when(() => service.fetchModels()).thenAnswer((_) async => ['llava']);
+      when(() => service.fetchModelInfo(any())).thenAnswer((_) async =>
+          <String, dynamic>{
+            'capabilities': ['completion', 'vision', 'thinking', 'tools'],
+          });
+      await models.fetchModels(service);
+      await tester.pump();
+
+      final chat = ChatProvider(initialConversations: [
+        Conversation(
+          id: 'c',
+          model: 'llava',
+          title: 'Paris trip',
+          numCtx: 8192,
+          messages: [
+            if (withMessages)
+              for (var i = 0; i < pairs; i++) ...[
+                ChatMessage(role: 'user', content: 'hello $i'),
+                ChatMessage(role: 'assistant', content: 'Hi there $i'),
+              ],
+          ],
+        ),
+      ]);
+      addTearDown(chat.dispose);
+      chat.setActiveConversation(chat.conversations.first);
+      chat.setSearxngUrl('http://search.local');
+      chat.addPendingImage(_redPng);
+      chat.setPendingFile('notes.txt', _redPng, 'text/plain');
+
+      await tester.pumpWidget(_wrap(chat, models: models));
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byType(TextField), 'draft text');
+      await tester.pumpAndSettle();
+      return chat;
+    }
+
+    testSemantics('every tappable control on the chat screen has a label',
+        (tester) async {
+      await pumpPopulated(tester);
+
+      await expectLater(tester, meetsGuideline(labeledTapTargetGuideline));
+    });
+
+    testSemantics('the app bar and composer meet the 48 dp guideline',
+        (tester) async {
+      // No messages: their action rows are the 40 dp exception, tested below.
+      await pumpPopulated(tester, withMessages: false);
+
+      await expectLater(
+        tester,
+        meetsGuideline(_TapTargets(const Size(48, 48), skip: _isTitleBlock)),
+      );
+    });
+
+    testSemantics('with messages, everything else is 48 dp and the actions 40',
+        (tester) async {
+      await pumpPopulated(tester);
+
+      await expectLater(
+        tester,
+        meetsGuideline(_TapTargets(const Size(48, 48),
+            skip: (d) => _isTitleBlock(d) || _isMessageAction(d))),
+      );
+      await expectLater(
+        tester,
+        meetsGuideline(_TapTargets(const Size(40, 40), skip: _isTitleBlock)),
+      );
+    });
+
+    testSemantics('the title and model lines are labeled and as tall as the '
+        'bar allows', (tester) async {
+      await pumpPopulated(tester);
+
+      final title = find.bySemanticsLabel('Rename chat');
+      final model = find.bySemanticsLabel('Switch model');
+      expect(title, findsOneWidget);
+      expect(model, findsOneWidget);
+      // The pair tiles the 56 dp bar and spans the title area.
+      final titleSize = tester.getSize(title);
+      final modelSize = tester.getSize(model);
+      expect(titleSize.height + modelSize.height, kToolbarHeight);
+      expect(titleSize.height, greaterThanOrEqualTo(30));
+      expect(modelSize.height, greaterThanOrEqualTo(24));
+      expect(titleSize.width, greaterThanOrEqualTo(48));
+      expect(modelSize.width, greaterThanOrEqualTo(48));
+      // They say what they act on.
+      expect(
+          tester.getSemantics(title),
+          matchesSemantics(
+            label: 'Rename chat',
+            value: 'Paris trip',
+            isButton: true,
+            hasTapAction: true,
+          ));
+      expect(
+          tester.getSemantics(model),
+          matchesSemantics(
+            label: 'Switch model',
+            value: 'llava',
+            isButton: true,
+            hasTapAction: true,
+          ));
+    });
+
+    testSemantics('the title and model lines open rename and the picker',
+        (tester) async {
+      final chat = ChatProvider(initialConversations: [
+        Conversation(id: 'c', model: 'llama3', title: 'Paris trip'),
+      ]);
+      addTearDown(chat.dispose);
+      chat.setActiveConversation(chat.conversations.first);
+      final models = await _modelsWith(tester, ['llama3', 'phi3']);
+      await tester.pumpWidget(_wrap(chat, models: models));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.bySemanticsLabel('Rename chat'));
+      await tester.pumpAndSettle();
+      expect(find.text('Rename conversation'), findsOneWidget);
+      await tester.tap(find.text('Cancel'));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.bySemanticsLabel('Switch model'));
+      await tester.pumpAndSettle();
+      expect(find.text('SWITCH MODEL'), findsOneWidget);
+      await tester.tap(find.text('phi3'));
+      await tester.pumpAndSettle();
+      expect(chat.activeConversation!.model, 'phi3');
+    });
+
+    testSemantics(
+        'the menu, settings pill and new chat button are labeled 48 dp targets',
+        (tester) async {
+      await pumpPopulated(tester, withMessages: false);
+
+      expect(_touchSize(tester, find.byTooltip('Open navigation menu')),
+          const Size(48, 48));
+      expect(_touchSize(tester, find.byTooltip('New chat')),
+          const Size(48, 48));
+      final pill = _touchSize(tester, find.bySemanticsLabel('Chat settings'));
+      expect(pill.width, greaterThanOrEqualTo(48));
+      expect(pill.height, greaterThanOrEqualTo(48));
+      expect(
+          tester.getSemantics(find.bySemanticsLabel('Chat settings')),
+          matchesSemantics(
+            label: 'Chat settings',
+            value: '8K ctx',
+            isButton: true,
+            hasTapAction: true,
+          ));
+
+      // The pill still opens the settings sheet, and the menu the sidebar.
+      await tester.tap(find.bySemanticsLabel('Chat settings'));
+      await tester.pumpAndSettle();
+      expect(find.text('Save'), findsOneWidget);
+      await tester.tapAt(const Offset(200, 20));
+      await tester.pumpAndSettle();
+      expect(find.text('Save'), findsNothing);
+
+      await tester.tap(find.byTooltip('Open navigation menu'));
+      await tester.pumpAndSettle();
+      expect(find.byType(Drawer), findsOneWidget);
+    });
+
+    testSemantics('the jump-to-latest pill is a labeled 48 dp target',
+        (tester) async {
+      final chat = await pumpPopulated(tester, pairs: 30);
+      expect(chat.activeConversation!.messages, hasLength(60));
+      for (var i = 0; i < 3; i++) {
+        await tester.drag(find.byType(ListView), const Offset(0, 700));
+        await tester.pumpAndSettle();
+      }
+
+      final jump = find.byTooltip('Jump to latest message');
+      expect(jump, findsOneWidget);
+      expect(_touchSize(tester, jump), const Size(48, 48));
+      await expectLater(tester, meetsGuideline(labeledTapTargetGuideline));
+      await expectLater(
+        tester,
+        meetsGuideline(_TapTargets(const Size(48, 48),
+            skip: (d) => _isTitleBlock(d) || _isMessageAction(d))),
+      );
+
+      await tester.tap(jump);
+      await tester.pumpAndSettle();
+      expect(_listPosition(tester).pixels, 0);
+    });
+
+    testSemantics('an empty chat and its starter chips meet the guidelines',
+        (tester) async {
+      await pumpPopulated(tester, withMessages: false);
+
+      expect(find.text('Start a conversation'), findsOneWidget);
+      await expectLater(tester, meetsGuideline(labeledTapTargetGuideline));
+    });
+
+    testSemantics('the open sidebar meets the guidelines', (tester) async {
+      await pumpPopulated(tester);
+
+      await tester.tap(find.byTooltip('Open navigation menu'));
+      await tester.pumpAndSettle();
+      expect(find.text('LLM Disco'), findsOneWidget);
+
+      await expectLater(tester, meetsGuideline(labeledTapTargetGuideline));
+      await expectLater(tester, meetsGuideline(androidTapTargetGuideline));
     });
   });
 }

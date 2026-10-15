@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:llm_disco_test1/models/chat_message.dart';
 import 'package:llm_disco_test1/widgets/message_bubble.dart';
@@ -14,6 +15,20 @@ Widget _wrap(Widget child) {
       body: SingleChildScrollView(child: child),
     ),
   );
+}
+
+/// `androidTapTargetGuideline`'s check at [size], minus read-only text
+/// fields: selectable message text carries a long-press (to start selecting),
+/// but it is content, not a control.
+class _TapTargets extends MinimumTapTargetGuideline {
+  const _TapTargets(Size size)
+      : super(size: size, link: 'https://support.google.com/accessibility/android/answer/7101858');
+
+  @override
+  bool shouldSkipNode(SemanticsNode node) {
+    final flags = node.getSemanticsData().flagsCollection;
+    return super.shouldSkipNode(node) || (flags.isTextField && flags.isReadOnly);
+  }
 }
 
 // 1x1 PNGs: red and blue.
@@ -396,6 +411,198 @@ void main() {
       // reused for a different message, as in an unkeyed list.
       await tester.pumpWidget(_wrap(MessageBubble(message: second)));
       expect(shownBytes(), base64Decode(_bluePng));
+    });
+  });
+
+  group('cut-off note', () {
+    const note = 'Cut off — the model hit its length limit';
+
+    testWidgets('an assistant reply that hit the length limit says so',
+        (tester) async {
+      final msg =
+          ChatMessage(role: 'assistant', content: 'The story begins', cutOff: true);
+
+      await tester.pumpWidget(_wrap(MessageBubble(message: msg)));
+      await tester.pump();
+
+      expect(find.text(note), findsOneWidget);
+      expect(find.byIcon(Icons.info_outline_rounded), findsOneWidget);
+      // under the content, above the action row
+      final noteTop = tester.getTopLeft(find.text(note)).dy;
+      expect(noteTop,
+          greaterThan(tester.getBottomLeft(find.textContaining('The story begins',
+                  findRichText: true)).dy));
+      expect(noteTop, lessThan(tester.getTopLeft(find.byIcon(Icons.copy_rounded)).dy));
+    });
+
+    testWidgets('a complete reply has no note', (tester) async {
+      final msg = ChatMessage(role: 'assistant', content: 'Done.');
+
+      await tester.pumpWidget(_wrap(MessageBubble(message: msg)));
+      await tester.pump();
+
+      expect(find.text(note), findsNothing);
+      expect(find.byIcon(Icons.info_outline_rounded), findsNothing);
+    });
+
+    testWidgets('thinking with no answer still shows it', (tester) async {
+      final msg = ChatMessage(
+        role: 'assistant',
+        content: '',
+        thinking: 'Still working it out',
+        cutOff: true,
+      );
+
+      await tester.pumpWidget(_wrap(MessageBubble(message: msg)));
+      await tester.pump();
+
+      expect(find.text('Thinking'), findsOneWidget);
+      expect(find.text(note), findsOneWidget);
+    });
+
+    testWidgets('a cut-off reply with a retry offers both', (tester) async {
+      var retried = false;
+      final msg = ChatMessage(role: 'assistant', content: 'Half an answ', cutOff: true);
+
+      await tester.pumpWidget(_wrap(
+        MessageBubble(message: msg, onRetry: () => retried = true),
+      ));
+      await tester.pump();
+      await tester.tap(find.byTooltip('Retry'));
+
+      expect(find.text(note), findsOneWidget);
+      expect(retried, isTrue);
+    });
+  });
+
+  group('accessibility', () {
+    void testSemantics(
+        String description, Future<void> Function(WidgetTester) body) {
+      testWidgets(description, (tester) async {
+        final semantics = tester.ensureSemantics();
+        try {
+          await body(tester);
+        } finally {
+          semantics.dispose();
+        }
+      });
+    }
+
+    Size touchSize(WidgetTester tester, Finder finder) =>
+        tester.getSemantics(finder).rect.size;
+
+    testSemantics('message actions are labeled 40 dp touch targets',
+        (tester) async {
+      await tester.pumpWidget(_wrap(Column(children: [
+        MessageBubble(
+          message: ChatMessage(role: 'user', content: 'hello'),
+          onEdit: () {},
+          onDelete: () {},
+        ),
+        MessageBubble(
+          message: ChatMessage(role: 'assistant', content: 'Hi there'),
+          onRetry: () {},
+        ),
+      ])));
+      await tester.pump();
+
+      for (final tooltip in ['Copy', 'Edit & resend', 'Delete', 'Retry']) {
+        final buttons = find.byTooltip(tooltip);
+        expect(buttons, findsWidgets, reason: tooltip);
+        for (final button in buttons.evaluate()) {
+          final size = touchSize(tester, find.byWidget(button.widget));
+          expect(size.width, greaterThanOrEqualTo(40), reason: tooltip);
+          expect(size.height, greaterThanOrEqualTo(40), reason: tooltip);
+        }
+      }
+      await expectLater(tester, meetsGuideline(labeledTapTargetGuideline));
+    });
+
+    testSemantics('the error bubble\'s Retry is a labeled 48 dp target',
+        (tester) async {
+      var retried = false;
+      final msg = ChatMessage(
+          role: 'assistant', content: 'Connection failed', isError: true);
+
+      await tester.pumpWidget(_wrap(
+        MessageBubble(message: msg, onRetry: () => retried = true),
+      ));
+      await tester.pump();
+
+      final retry = find.bySemanticsLabel('Retry');
+      expect(retry, findsOneWidget);
+      expect(touchSize(tester, retry).width, greaterThanOrEqualTo(48));
+      expect(touchSize(tester, retry).height, greaterThanOrEqualTo(48));
+      await expectLater(tester, meetsGuideline(labeledTapTargetGuideline));
+      await expectLater(tester, meetsGuideline(const _TapTargets(Size(48, 48))));
+
+      // The transparent padding above the pill is part of the button.
+      final pill = tester.getRect(find
+          .ancestor(of: find.text('Retry'), matching: find.byType(Container))
+          .first);
+      final target = tester.getRect(retry);
+      final inPadding = Offset(pill.center.dx, (target.top + pill.top) / 2);
+      expect(pill.contains(inPadding), isFalse);
+      expect(target.contains(inPadding), isTrue);
+      await tester.tapAt(inPadding);
+      expect(retried, isTrue);
+    });
+
+    testSemantics('thinking, code and image chips reach 40 dp',
+        (tester) async {
+      final msg = ChatMessage(
+        role: 'assistant',
+        thinking: 'pondering',
+        content: 'Look:\n\n```dart\nvoid main() {}\n```\n\n'
+            '![a chart](https://example.com/chart.png)',
+      );
+
+      await tester.pumpWidget(_wrap(MessageBubble(message: msg)));
+      await tester.pump();
+
+      expect(find.text('a chart'), findsOneWidget);
+      await expectLater(tester, meetsGuideline(labeledTapTargetGuideline));
+      await expectLater(
+          tester, meetsGuideline(const _TapTargets(Size(40, 40))));
+    });
+
+    testSemantics('a user bubble offers its actions as buttons only',
+        (tester) async {
+      var edited = false;
+      await tester.pumpWidget(_wrap(MessageBubble(
+        message: ChatMessage(role: 'user', content: 'My question'),
+        onEdit: () => edited = true,
+        onDelete: () {},
+      )));
+      await tester.pump();
+
+      // The bubble's long-press duplicates the buttons below it, so it isn't
+      // announced as a second, bubble-sized action: the only node with a
+      // long-press left is the selectable text itself.
+      final longPressable = <SemanticsData>[];
+      void visit(SemanticsNode node) {
+        final data = node.getSemanticsData();
+        if (data.hasAction(SemanticsAction.longPress)) longPressable.add(data);
+        node.visitChildren((child) {
+          visit(child);
+          return true;
+        });
+      }
+
+      visit(RendererBinding.instance.renderViews.first.owner!.semanticsOwner!
+          .rootSemanticsNode!);
+      expect(longPressable, hasLength(1));
+      expect(longPressable.single.flagsCollection.isTextField, isTrue);
+
+      // ...but it still works for sighted users (on the bubble's padding; the
+      // selectable text takes long-presses on itself).
+      await tester.longPressAt(
+          tester.getTopLeft(find.text('My question')) - const Offset(6, 6));
+      await tester.pumpAndSettle();
+      expect(find.text('Delete message & response'), findsOneWidget);
+      await tester.tap(find.text('Edit & resend'));
+      await tester.pumpAndSettle();
+      expect(edited, isTrue);
     });
   });
 }

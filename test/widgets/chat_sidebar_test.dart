@@ -407,6 +407,249 @@ void main() {
       expect(chat.activeConversation!.model, 'llama3');
     });
   });
+
+  group('ordered by last activity', () {
+    final now = DateTime.now();
+    final longAgo = DateTime(now.year, now.month, now.day - 40, 9);
+    final threeDaysAgo = DateTime(now.year, now.month, now.day - 3, 9);
+    // Fixed times on today's date: the sidebar groups by calendar day, so
+    // these stay "Today" whenever the test runs.
+    final todayEarly = DateTime(now.year, now.month, now.day, 0, 0, 10);
+    final todayLater = DateTime(now.year, now.month, now.day, 0, 0, 20);
+
+    Conversation chatAt(String id, DateTime created, [DateTime? lastMessage]) =>
+        Conversation(
+          id: id,
+          model: 'llama3',
+          title: 'Chat $id',
+          createdAt: created,
+          messages: [
+            if (lastMessage != null)
+              ChatMessage(
+                  role: 'user', content: 'note $id', timestamp: lastMessage),
+          ],
+        );
+
+    double top(WidgetTester tester, String text) =>
+        tester.getTopLeft(find.text(text)).dy;
+
+    test('conversationLastActivity is the newest message, else creation', () {
+      expect(conversationLastActivity(chatAt('a', longAgo)), longAgo);
+      expect(
+          conversationLastActivity(chatAt('a', longAgo, todayEarly)), todayEarly);
+    });
+
+    testWidgets('an old chat written to today is listed under Today, above a '
+        'newer chat that went quiet', (tester) async {
+      final chat = ChatProvider(initialConversations: [
+        chatAt('quiet', threeDaysAgo), // newer, but untouched since
+        chatAt('old', longAgo, todayEarly), // created long ago, used today
+      ]);
+      addTearDown(chat.dispose);
+
+      await tester.pumpWidget(wrapSidebar(chat));
+      await tester.pumpAndSettle();
+
+      expect(find.text('TODAY'), findsOneWidget);
+      expect(find.text('PREVIOUS 7 DAYS'), findsOneWidget);
+      expect(find.text('OLDER'), findsNothing);
+      expect(top(tester, 'TODAY'), lessThan(top(tester, 'Chat old')));
+      expect(top(tester, 'Chat old'),
+          lessThan(top(tester, 'PREVIOUS 7 DAYS')));
+      expect(top(tester, 'PREVIOUS 7 DAYS'),
+          lessThan(top(tester, 'Chat quiet')));
+      // Display order only: the provider's list is untouched.
+      expect(chat.conversations.map((c) => c.id), ['quiet', 'old']);
+    });
+
+    testWidgets('within a group the most recently used chat comes first',
+        (tester) async {
+      final chat = ChatProvider(initialConversations: [
+        chatAt('first', todayEarly),
+        chatAt('second', todayEarly, todayLater),
+        chatAt('third', longAgo, todayLater.add(const Duration(seconds: 5))),
+      ]);
+      addTearDown(chat.dispose);
+
+      await tester.pumpWidget(wrapSidebar(chat));
+      await tester.pumpAndSettle();
+
+      expect(top(tester, 'Chat third'), lessThan(top(tester, 'Chat second')));
+      expect(top(tester, 'Chat second'), lessThan(top(tester, 'Chat first')));
+    });
+
+    testWidgets('chats with the same activity keep the provider order',
+        (tester) async {
+      final chat = ChatProvider(initialConversations: [
+        chatAt('x', todayEarly),
+        chatAt('y', todayEarly),
+        chatAt('z', todayEarly),
+      ]);
+      addTearDown(chat.dispose);
+
+      await tester.pumpWidget(wrapSidebar(chat));
+      await tester.pumpAndSettle();
+
+      expect(top(tester, 'Chat x'), lessThan(top(tester, 'Chat y')));
+      expect(top(tester, 'Chat y'), lessThan(top(tester, 'Chat z')));
+    });
+
+    testWidgets('search results keep the same order', (tester) async {
+      tester.view.physicalSize = const Size(800, 1600);
+      tester.view.devicePixelRatio = 2;
+      addTearDown(tester.view.reset);
+      final chat = ChatProvider(initialConversations: [
+        chatAt('a', todayEarly),
+        chatAt('b', longAgo, todayLater),
+        chatAt('c', longAgo),
+      ]);
+      addTearDown(chat.dispose);
+
+      await tester.pumpWidget(wrapSidebar(chat));
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byType(TextField), 'chat');
+      await tester.pumpAndSettle();
+
+      expect(top(tester, 'Chat b'), lessThan(top(tester, 'Chat a')));
+      expect(top(tester, 'Chat a'), lessThan(top(tester, 'Chat c')));
+    });
+
+    testWidgets('a new message moves its chat up while the drawer is open',
+        (tester) async {
+      final chat = ChatProvider(initialConversations: [
+        chatAt('busy', todayLater),
+        chatAt('idle', longAgo),
+      ]);
+      addTearDown(chat.dispose);
+
+      await tester.pumpWidget(wrapSidebar(chat));
+      await tester.pumpAndSettle();
+      expect(find.text('OLDER'), findsOneWidget);
+      expect(top(tester, 'Chat busy'), lessThan(top(tester, 'Chat idle')));
+
+      chat.conversations.last.messages.add(ChatMessage(
+        role: 'user',
+        content: 'back again',
+        timestamp: todayLater.add(const Duration(minutes: 1)),
+      ));
+      chat.conversationSettingsChanged();
+      await tester.pumpAndSettle();
+
+      expect(find.text('OLDER'), findsNothing);
+      expect(top(tester, 'Chat idle'), lessThan(top(tester, 'Chat busy')));
+    });
+  });
+
+  group('accessibility', () {
+    void testSemantics(
+        String description, Future<void> Function(WidgetTester) body) {
+      testWidgets(description, (tester) async {
+        final semantics = tester.ensureSemantics();
+        try {
+          await body(tester);
+        } finally {
+          semantics.dispose();
+        }
+      });
+    }
+
+    Size touchSize(WidgetTester tester, Finder finder) =>
+        tester.getSemantics(finder).rect.size;
+
+    Future<ChatProvider> openSidebar(WidgetTester tester) async {
+      tester.view.physicalSize = const Size(800, 1600);
+      tester.view.devicePixelRatio = 2;
+      addTearDown(tester.view.reset);
+      final chat = ChatProvider(initialConversations: [
+        Conversation(id: '1', model: 'llama3', title: 'Paris trip', messages: [
+          ChatMessage(role: 'user', content: 'hello'),
+        ]),
+        Conversation(id: '2', model: 'llama3', title: 'Tax notes'),
+        Conversation(
+          id: '3',
+          model: 'llama3',
+          title: 'Old thing',
+          createdAt: DateTime.now().subtract(const Duration(days: 60)),
+        ),
+      ]);
+      addTearDown(chat.dispose);
+      final models = await _modelsWith(['llama3', 'phi3']);
+      final key = GlobalKey<ScaffoldState>();
+      await tester.pumpWidget(wrapSidebarDrawer(chat, key, models: models));
+      key.currentState!.openDrawer();
+      await tester.pumpAndSettle();
+      return chat;
+    }
+
+    testSemantics('every control is labeled and a 48 dp target', (tester) async {
+      await openSidebar(tester);
+
+      await expectLater(tester, meetsGuideline(labeledTapTargetGuideline));
+      await expectLater(tester, meetsGuideline(androidTapTargetGuideline));
+    });
+
+    testSemantics('with a search typed and an undo offer showing',
+        (tester) async {
+      final chat = await openSidebar(tester);
+
+      await tester.enterText(find.byType(TextField), 'a');
+      await tester.pumpAndSettle();
+      final clear = find.byTooltip('Clear search');
+      expect(touchSize(tester, clear), const Size(48, 48));
+
+      await tester.drag(find.text('Tax notes'), const Offset(-500, 0));
+      await tester.pumpAndSettle();
+      expect(chat.undoableDeletes, 1);
+
+      await expectLater(tester, meetsGuideline(labeledTapTargetGuideline));
+      await expectLater(tester, meetsGuideline(androidTapTargetGuideline));
+
+      await tester.tap(clear);
+      await tester.pumpAndSettle();
+      expect(find.text('Old thing'), findsOneWidget);
+
+      await tester.pump(ChatProvider.undoWindow);
+    });
+
+    testSemantics('options, new chat and footer rows are labeled 48 dp '
+        'targets', (tester) async {
+      await openSidebar(tester);
+
+      final options = find.byTooltip('Chat options');
+      expect(options, findsNWidgets(3));
+      for (final button in options.evaluate()) {
+        expect(touchSize(tester, find.byWidget(button.widget)),
+            const Size(48, 48));
+      }
+      for (final text in [
+        'New chat',
+        'Manage models',
+        'Backup & restore',
+        'Switch server',
+      ]) {
+        final size = touchSize(tester, find.text(text));
+        expect(size.height, greaterThanOrEqualTo(48), reason: text);
+        expect(size.width, greaterThanOrEqualTo(48), reason: text);
+      }
+      // the footer model selector is a button too
+      final selector = tester.getSemantics(find.text('llama3').last);
+      final data = selector.getSemanticsData();
+      expect(data.label, 'llama3');
+      expect(data.hint, 'Select model');
+      expect(data.flagsCollection.isButton, isTrue);
+      expect(selector.rect.height, greaterThanOrEqualTo(48));
+    });
+
+    testSemantics('the options button still opens the options sheet',
+        (tester) async {
+      await openSidebar(tester);
+
+      await tester.tap(find.byTooltip('Chat options').first);
+      await tester.pumpAndSettle();
+
+      expect(find.text('Rename'), findsOneWidget);
+    });
+  });
 }
 
 Future<ModelProvider> _modelsWith(List<String> names) async {

@@ -8,6 +8,7 @@ import 'package:url_launcher/url_launcher.dart';
 import '../models/chat_message.dart';
 import '../theme/app_theme.dart';
 import 'code_block_builder.dart';
+import 'tap_target.dart';
 
 class MessageBubble extends StatelessWidget {
   final ChatMessage message;
@@ -69,7 +70,11 @@ class MessageBubble extends StatelessWidget {
     final tokens = theme.extension<DiscoTokens>()!;
 
     if (isUser) {
+      // The long-press only duplicates the Copy/Edit/Delete buttons under the
+      // bubble, so screen readers get those and not a second, bubble-sized
+      // action.
       final bubble = GestureDetector(
+          excludeFromSemantics: true,
           onLongPress: () => onEdit != null
               ? _showUserMessageOptions(context)
               : _copyToClipboard(context),
@@ -155,35 +160,34 @@ class MessageBubble extends StatelessWidget {
           mainAxisSize: MainAxisSize.min,
           children: [
             bubble,
-            Padding(
-              padding: const EdgeInsets.only(bottom: 4),
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
+            // The buttons are 40 dp tall; no extra gap below keeps the
+            // row close to its old height.
+            Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                _MetaAction(
+                  icon: Icons.copy_rounded,
+                  tooltip: 'Copy',
+                  color: tokens.textFaint,
+                  onTap: () => _copyToClipboard(context),
+                ),
+                if (onEdit != null)
                   _MetaAction(
-                    icon: Icons.copy_rounded,
-                    tooltip: 'Copy',
+                    icon: Icons.edit_outlined,
+                    tooltip: 'Edit & resend',
                     color: tokens.textFaint,
-                    onTap: () => _copyToClipboard(context),
+                    onTap: onEdit!,
                   ),
-                  if (onEdit != null)
-                    _MetaAction(
-                      icon: Icons.edit_outlined,
-                      tooltip: 'Edit & resend',
-                      color: tokens.textFaint,
-                      onTap: onEdit!,
-                    ),
-                  // The long-press sheet that also offers this loses to the
-                  // SelectableText's own gestures, so surface it here.
-                  if (onDelete != null)
-                    _MetaAction(
-                      icon: Icons.delete_outline_rounded,
-                      tooltip: 'Delete',
-                      color: tokens.textFaint,
-                      onTap: onDelete!,
-                    ),
-                ],
-              ),
+                // The long-press sheet that also offers this loses to the
+                // SelectableText's own gestures, so surface it here.
+                if (onDelete != null)
+                  _MetaAction(
+                    icon: Icons.delete_outline_rounded,
+                    tooltip: 'Delete',
+                    color: tokens.textFaint,
+                    onTap: onDelete!,
+                  ),
+              ],
             ),
           ],
         ),
@@ -270,42 +274,47 @@ class MessageBubble extends StatelessWidget {
               onTapLink: (text, href, title) => _openLink(href),
               styleSheet: _buildMarkdownStyle(theme, msgColors, tokens),
             ),
-          if (isError && onRetry != null) ...[
-            const SizedBox(height: 8),
-            GestureDetector(
-              onTap: onRetry,
-              child: Container(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                decoration: BoxDecoration(
-                  color: msgColors.errorRetry.withValues(alpha: 0.15),
-                  borderRadius: BorderRadius.circular(16),
-                ),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Icon(Icons.refresh_rounded,
-                        size: 14, color: msgColors.errorRetry),
-                    const SizedBox(width: 4),
-                    Text(
-                      'Retry',
-                      style: TextStyle(
-                        color: msgColors.errorRetry,
-                        fontSize: 12,
-                        fontWeight: FontWeight.w600,
+          if (message.cutOff) _CutOffNote(tokens: tokens),
+          if (isError && onRetry != null)
+            Align(
+              alignment: Alignment.centerLeft,
+              child: TapTarget(
+                label: 'Retry',
+                onTap: onRetry!,
+                alignment: Alignment.centerLeft,
+                child: Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                  decoration: BoxDecoration(
+                    color: msgColors.errorRetry.withValues(alpha: 0.15),
+                    borderRadius: BorderRadius.circular(16),
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(Icons.refresh_rounded,
+                          size: 14, color: msgColors.errorRetry),
+                      const SizedBox(width: 4),
+                      Text(
+                        'Retry',
+                        style: TextStyle(
+                          color: msgColors.errorRetry,
+                          fontSize: 12,
+                          fontWeight: FontWeight.w600,
+                        ),
                       ),
-                    ),
-                  ],
+                    ],
+                  ),
                 ),
               ),
             ),
-          ],
           // An empty response (e.g. a thinking model that ran out of budget)
           // still needs Retry; Copy only makes sense with text.
           if (!isError &&
               !isStreaming &&
-              (message.content.isNotEmpty || onRetry != null)) ...[
-            const SizedBox(height: 6),
+              (message.content.isNotEmpty || onRetry != null))
+            // The buttons are 40 dp tall, which already leaves the gap the
+            // old 6 dp spacer provided above the icons.
             Row(
               children: [
                 if (metaLabel != null)
@@ -331,7 +340,6 @@ class MessageBubble extends StatelessWidget {
                   ),
               ],
             ),
-          ],
         ],
       ),
     );
@@ -440,17 +448,50 @@ class _MetaAction extends StatelessWidget {
     required this.onTap,
   });
 
+  /// 40 dp rather than the 48 dp guideline: these sit in a row under every
+  /// message, and 48 would add a third of a line's height to each exchange.
+  static const double size = 40;
+
   @override
   Widget build(BuildContext context) {
-    return SizedBox(
-      width: 28,
-      height: 28,
-      child: IconButton(
+    return IconButton(
+      iconSize: 15,
+      tooltip: tooltip,
+      icon: Icon(icon, color: color),
+      onPressed: onTap,
+      style: IconButton.styleFrom(
+        fixedSize: const Size.square(size),
+        minimumSize: const Size.square(size),
         padding: EdgeInsets.zero,
-        iconSize: 15,
-        tooltip: tooltip,
-        icon: Icon(icon, color: color),
-        onPressed: onTap,
+        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+      ),
+    );
+  }
+}
+
+/// Small muted note under a reply that stopped at the model's length limit,
+/// styled like the tok/s line.
+class _CutOffNote extends StatelessWidget {
+  final DiscoTokens tokens;
+
+  const _CutOffNote({required this.tokens});
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(top: 8),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(Icons.info_outline_rounded, size: 13, color: tokens.textFaint),
+          const SizedBox(width: 6),
+          Flexible(
+            child: Text(
+              'Cut off — the model hit its length limit',
+              style: AppTheme.mono(fontSize: 10.5, color: tokens.textFaint),
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -609,27 +650,37 @@ class _ImagePlaceholder extends StatelessWidget {
     return GestureDetector(
       behavior: HitTestBehavior.opaque,
       onTap: () => _openLink(uri.toString()),
-      child: Container(
-        margin: const EdgeInsets.symmetric(vertical: 2),
-        padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 4),
-        decoration: BoxDecoration(
-          border: Border.all(color: tokens.line),
-          borderRadius: BorderRadius.circular(8),
-        ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(Icons.image_outlined, size: 14, color: tokens.textFaint),
-            const SizedBox(width: 6),
-            Flexible(
-              child: Text(
-                label,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: AppTheme.mono(fontSize: 12, color: tokens.textMuted),
-              ),
+      // The chip itself stays ~26 dp tall; its touch region is padded to 40.
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(minHeight: 40),
+        child: Align(
+          alignment: Alignment.centerLeft,
+          widthFactor: 1,
+          heightFactor: 1,
+          child: Container(
+            margin: const EdgeInsets.symmetric(vertical: 2),
+            padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 4),
+            decoration: BoxDecoration(
+              border: Border.all(color: tokens.line),
+              borderRadius: BorderRadius.circular(8),
             ),
-          ],
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(Icons.image_outlined, size: 14, color: tokens.textFaint),
+                const SizedBox(width: 6),
+                Flexible(
+                  child: Text(
+                    label,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style:
+                        AppTheme.mono(fontSize: 12, color: tokens.textMuted),
+                  ),
+                ),
+              ],
+            ),
+          ),
         ),
       ),
     );
@@ -668,7 +719,11 @@ class _ThinkingSectionState extends State<_ThinkingSection> {
         children: [
           InkWell(
             onTap: () => setState(() => _expanded = !_expanded),
-            child: Padding(
+            child: Container(
+              // 40 dp touch height (the header was ~34): a full 48 would make
+              // the collapsed card visibly chunkier.
+              constraints: const BoxConstraints(minHeight: 40),
+              alignment: Alignment.centerLeft,
               padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
               child: Row(
                 children: [

@@ -75,7 +75,9 @@ class _CodeBlockWithCopyState extends State<_CodeBlockWithCopy> {
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           Container(
-            padding: const EdgeInsets.fromLTRB(11, 4, 4, 4),
+            // The copy button supplies the header's height (40 dp touch
+            // target, up from 30; the header grows from 38 to 40).
+            padding: const EdgeInsets.fromLTRB(11, 0, 4, 0),
             decoration: BoxDecoration(
               border: Border(bottom: BorderSide(color: tokens.line)),
             ),
@@ -91,7 +93,7 @@ class _CodeBlockWithCopyState extends State<_CodeBlockWithCopy> {
                   style: TextButton.styleFrom(
                     foregroundColor: tokens.textFaint,
                     padding: const EdgeInsets.symmetric(horizontal: 8),
-                    minimumSize: const Size(0, 30),
+                    minimumSize: const Size(0, 40),
                     tapTargetSize: MaterialTapTargetSize.shrinkWrap,
                   ),
                   icon: Icon(

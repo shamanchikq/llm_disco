@@ -13,6 +13,7 @@ import '../screens/model_management_screen.dart';
 import '../services/storage_service.dart';
 import '../theme/app_theme.dart';
 import 'model_selector.dart';
+import 'tap_target.dart';
 
 /// Sidebar age bucket for a chat created at [createdAt]. Day counts come from
 /// UTC dates built out of each side's local calendar date: subtracting two
@@ -28,6 +29,12 @@ String conversationGroupFor(DateTime createdAt, DateTime now) {
   if (diff <= 7) return 'Previous 7 days';
   return 'Older';
 }
+
+/// When a chat was last used: its newest message, or its creation while it
+/// has none. The sidebar orders and groups by this, so a chat from last month
+/// that was written to today sits under "Today".
+DateTime conversationLastActivity(Conversation c) =>
+    c.messages.isEmpty ? c.createdAt : c.messages.last.timestamp;
 
 class ChatSidebar extends StatefulWidget {
   const ChatSidebar({super.key});
@@ -46,7 +53,7 @@ class _ChatSidebarState extends State<ChatSidebar> {
     // so the undo bar appears and expires without another list change
     cp.undoableDeletes,
     Object.hashAll(cp.conversations.map((c) => Object.hash(
-      c.id, c.title, c.messages.length,
+      c.id, c.title, c.messages.length, conversationLastActivity(c),
     ))),
   );
 
@@ -96,8 +103,9 @@ class _ChatSidebarState extends State<ChatSidebar> {
     final baseUrl = context.watch<ConnectionProvider>().baseUrl;
     final host = baseUrl.replaceFirst(RegExp(r'^https?://'), '');
 
-    // Filter by search query (title or message text), then group by age,
-    // preserving provider order within groups.
+    // Filter by search query (title or message text), then order by last
+    // activity (newest first; equal times keep the provider's order — this is
+    // display order only) and group by age on that same moment.
     final query = _searchController.text.trim().toLowerCase();
     bool matches(Conversation c) =>
         query.isEmpty ||
@@ -105,11 +113,19 @@ class _ChatSidebarState extends State<ChatSidebar> {
         c.messages.any((m) => m.content.toLowerCase().contains(query));
 
     final now = DateTime.now();
+    final matching = chatProvider.conversations.where(matches).toList();
+    final byActivity = [
+      for (var i = 0; i < matching.length; i++)
+        (chat: matching[i], at: conversationLastActivity(matching[i]), i: i),
+    ]..sort((a, b) {
+        final newerFirst = b.at.compareTo(a.at);
+        return newerFirst != 0 ? newerFirst : a.i.compareTo(b.i);
+      });
     final grouped = <String, List<Conversation>>{};
-    for (final c in chatProvider.conversations.where(matches)) {
+    for (final entry in byActivity) {
       grouped
-          .putIfAbsent(conversationGroupFor(c.createdAt, now), () => [])
-          .add(c);
+          .putIfAbsent(conversationGroupFor(entry.at, now), () => [])
+          .add(entry.chat);
     }
     const groupOrder = ['Today', 'Yesterday', 'Previous 7 days', 'Older'];
 
@@ -228,10 +244,13 @@ class _ChatSidebarState extends State<ChatSidebar> {
                         size: 18, color: tokens.textFaint),
                     suffixIcon: query.isEmpty
                         ? null
-                        : GestureDetector(
-                            onTap: () => setState(_searchController.clear),
-                            child: Icon(Icons.close_rounded,
-                                size: 16, color: tokens.textFaint),
+                        : IconButton(
+                            tooltip: 'Clear search',
+                            iconSize: 16,
+                            onPressed: () =>
+                                setState(_searchController.clear),
+                            icon: Icon(Icons.close_rounded,
+                                color: tokens.textFaint),
                           ),
                   ),
                 ),
@@ -407,51 +426,54 @@ class _ChatSidebarState extends State<ChatSidebar> {
             onLongPress: () {
               _showConversationOptions(context, chatProvider, conversation);
             },
+            // The options button is a 48 dp touch target, so the tile's
+            // vertical padding moved onto the text column.
             child: Padding(
-              padding: const EdgeInsets.fromLTRB(11, 10, 4, 10),
+              padding: const EdgeInsets.only(left: 11),
               child: Row(
                 children: [
                   Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          conversation.title,
-                          style: TextStyle(
-                            fontSize: 13.5,
-                            color:
-                                isActive ? colors.primary : colors.onSurface,
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 10),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            conversation.title,
+                            style: TextStyle(
+                              fontSize: 13.5,
+                              color: isActive
+                                  ? colors.primary
+                                  : colors.onSurface,
+                            ),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
                           ),
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                        const SizedBox(height: 3),
-                        Text(
-                          '${conversation.model} · $msgCount msgs',
-                          style: AppTheme.mono(
-                            fontSize: 10.5,
-                            color: tokens.textFaint,
+                          const SizedBox(height: 3),
+                          Text(
+                            '${conversation.model} · $msgCount msgs',
+                            style: AppTheme.mono(
+                              fontSize: 10.5,
+                              color: tokens.textFaint,
+                            ),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
                           ),
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                      ],
+                        ],
+                      ),
                     ),
                   ),
                   // Visible entry point to rename/export — long-press
                   // still works as a shortcut.
-                  SizedBox(
-                    width: 30,
-                    height: 30,
-                    child: IconButton(
-                      padding: EdgeInsets.zero,
-                      iconSize: 16,
-                      tooltip: 'Options',
-                      icon: Icon(Icons.more_horiz_rounded,
-                          color: tokens.textFaint),
-                      onPressed: () => _showConversationOptions(
-                          context, chatProvider, conversation),
-                    ),
+                  IconButton(
+                    iconSize: 16,
+                    tooltip: 'Chat options',
+                    style: IconButton.styleFrom(
+                        tapTargetSize: MaterialTapTargetSize.padded),
+                    icon: Icon(Icons.more_horiz_rounded,
+                        color: tokens.textFaint),
+                    onPressed: () => _showConversationOptions(
+                        context, chatProvider, conversation),
                   ),
                 ],
               ),
@@ -469,24 +491,30 @@ class _ChatSidebarState extends State<ChatSidebar> {
     required DiscoTokens tokens,
     required VoidCallback onTap,
   }) {
-    return InkWell(
-      borderRadius: BorderRadius.circular(10),
-      onTap: onTap,
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 11),
-        child: Row(
-          children: [
-            Icon(icon, size: 19, color: tokens.textMuted),
-            const SizedBox(width: 11),
-            Expanded(
-              child: Text(
-                label,
-                style: TextStyle(fontSize: 14, color: tokens.textMuted),
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
+    return Semantics(
+      button: true,
+      child: InkWell(
+        borderRadius: BorderRadius.circular(10),
+        onTap: onTap,
+        child: Container(
+          // 48 dp touch height (the rows were ~43).
+          constraints: const BoxConstraints(minHeight: kTapTargetSize),
+          padding: const EdgeInsets.symmetric(horizontal: 11),
+          alignment: Alignment.centerLeft,
+          child: Row(
+            children: [
+              Icon(icon, size: 19, color: tokens.textMuted),
+              const SizedBox(width: 11),
+              Expanded(
+                child: Text(
+                  label,
+                  style: TextStyle(fontSize: 14, color: tokens.textMuted),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
               ),
-            ),
-          ],
+            ],
+          ),
         ),
       ),
     );
@@ -728,13 +756,18 @@ class _DashedBorderButton extends StatelessWidget {
       child: Material(
         color: Colors.transparent,
         borderRadius: BorderRadius.circular(radius),
-        child: InkWell(
-          borderRadius: BorderRadius.circular(radius),
-          onTap: onTap,
-          child: Padding(
-            padding:
-                const EdgeInsets.symmetric(horizontal: 14, vertical: 11),
-            child: child,
+        child: Semantics(
+          button: true,
+          child: InkWell(
+            borderRadius: BorderRadius.circular(radius),
+            onTap: onTap,
+            child: Container(
+              // 48 dp touch height (the button was ~40).
+              constraints: const BoxConstraints(minHeight: kTapTargetSize),
+              padding: const EdgeInsets.symmetric(horizontal: 14),
+              alignment: Alignment.centerLeft,
+              child: child,
+            ),
           ),
         ),
       ),

@@ -2,6 +2,7 @@ import 'dart:convert';
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/semantics.dart';
 import 'package:flutter/services.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:provider/provider.dart';
@@ -9,6 +10,29 @@ import '../models/conversation.dart';
 import '../providers/chat_provider.dart';
 import '../providers/model_provider.dart';
 import '../theme/app_theme.dart';
+import 'tap_target.dart';
+
+/// Largest text file that can be attached from the file picker. Its contents
+/// are inlined into the prompt, so a bigger one would overrun any context
+/// window and bloat the saved history.
+const int maxTextAttachmentBytes = 1024 * 1024;
+
+/// Largest image file that can be attached from the file picker.
+const int maxImageAttachmentBytes = 10 * 1024 * 1024;
+
+/// Camera and gallery photos are scaled down to fit this box (and
+/// re-encoded at [pickedImageQuality]) when picked: vision models shrink
+/// images far below it anyway, and full-resolution photos would otherwise
+/// ride along in every request and in the saved history.
+const double maxPickedImageDimension = 1024;
+const int pickedImageQuality = 85;
+
+/// Snackbar text for a file over its limit.
+String attachmentTooLargeMessage({required bool image}) {
+  final limit = image ? maxImageAttachmentBytes : maxTextAttachmentBytes;
+  return 'That file is too large — ${image ? 'image' : 'text'} attachments '
+      'are limited to ${limit ~/ (1024 * 1024)} MB';
+}
 
 /// Runs a platform picker call, turning a failure (no camera, permission
 /// denied, unreadable file) into a snackbar instead of an unhandled async
@@ -40,6 +64,18 @@ Future<Uint8List?> readPickedFile(PlatformFile file) async {
   }
 }
 
+/// A picked file's size without reading its contents; null when the picker
+/// can't tell.
+Future<int?> pickedFileSize(PlatformFile file) async {
+  final known = file.lengthSync();
+  if (known != null) return known;
+  try {
+    return await file.length();
+  } on Exception {
+    return null;
+  }
+}
+
 /// Tells a cancelled file picker (silent) apart from a chosen file whose
 /// bytes could not be read (worth telling the user about).
 PickedFileStatus classifyPickedFile(PlatformFile? file, Uint8List? bytes) {
@@ -51,7 +87,10 @@ class ChatInput extends StatefulWidget {
   /// Overrides the image picker (tests); defaults to the platform one.
   final ImagePicker? imagePicker;
 
-  const ChatInput({super.key, this.imagePicker});
+  /// Overrides the file picker (tests); defaults to the platform one.
+  final Future<PlatformFile?> Function()? filePicker;
+
+  const ChatInput({super.key, this.imagePicker, this.filePicker});
 
   @override
   State<ChatInput> createState() => _ChatInputState();
@@ -61,6 +100,10 @@ class _ChatInputState extends State<ChatInput> {
   final _controller = TextEditingController();
   final _focusNode = FocusNode();
   late final ImagePicker _picker = widget.imagePicker ?? ImagePicker();
+
+  /// Conversation whose remembered composer text the field is showing. The
+  /// one controller serves every chat, so switching chats swaps its text.
+  String? _fieldConversationId;
 
   @override
   void initState() {
@@ -75,6 +118,19 @@ class _ChatInputState extends State<ChatInput> {
     super.dispose();
   }
 
+  /// Puts the text remembered for [id] into the field when the active
+  /// conversation changed since the last build (half-typed text stays with
+  /// its chat instead of following the user into another one).
+  void _showComposerOf(ChatProvider chat, String? id) {
+    if (id == _fieldConversationId) return;
+    _fieldConversationId = id;
+    final text = id == null ? '' : chat.composerTextFor(id);
+    _controller.value = TextEditingValue(
+      text: text,
+      selection: TextSelection.collapsed(offset: text.length),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final chatProvider = context.watch<ChatProvider>();
@@ -84,14 +140,17 @@ class _ChatInputState extends State<ChatInput> {
     final tokens = theme.extension<DiscoTokens>()!;
 
     final conversation = chatProvider.activeConversation;
+    _showComposerOf(chatProvider, conversation?.id);
     if (conversation == null) return const SizedBox.shrink();
 
     // Starter chips on the empty state pre-fill the input via a draft.
     final draft = chatProvider.takeDraft();
     if (draft != null) {
-      _controller.text = draft;
-      _controller.selection =
-          TextSelection.collapsed(offset: draft.length);
+      _controller.value = TextEditingValue(
+        text: draft,
+        selection: TextSelection.collapsed(offset: draft.length),
+      );
+      chatProvider.setComposerText(conversation.id, draft);
       WidgetsBinding.instance
           .addPostFrameCallback((_) => _focusNode.requestFocus());
     }
@@ -109,6 +168,14 @@ class _ChatInputState extends State<ChatInput> {
     final busyElsewhere =
         chatProvider.isAnyStreaming && !chatProvider.isStreaming;
 
+    final hasChips = hasThinking || showSearchChip;
+    final hasFile = chatProvider.pendingFileName != null;
+    final hasPreviews = chatProvider.pendingImages.isNotEmpty || hasFile;
+    // The chips' touch rows are 48 dp tall around a ~30 dp pill, so they bring
+    // their own 9 dp of air; the usual gap is dropped on whichever side they
+    // touch to keep the composer as tall as it was.
+    final previewGap = hasChips ? 0.0 : 9.0;
+
     return Container(
       decoration: BoxDecoration(
         color: colors.surface,
@@ -116,14 +183,15 @@ class _ChatInputState extends State<ChatInput> {
       ),
       child: SafeArea(
         child: Padding(
-          padding: const EdgeInsets.fromLTRB(12, 9, 12, 10),
+          padding: EdgeInsets.fromLTRB(
+              12, hasChips && !hasPreviews ? 0 : 9, 12, 10),
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
               // Image previews (multi-attach)
               if (chatProvider.pendingImages.isNotEmpty)
                 Padding(
-                  padding: const EdgeInsets.only(bottom: 9),
+                  padding: EdgeInsets.only(bottom: hasFile ? 9 : previewGap),
                   child: Align(
                     alignment: Alignment.centerLeft,
                     child: Wrap(
@@ -147,23 +215,30 @@ class _ChatInputState extends State<ChatInput> {
                                   size: 84,
                                 ),
                               ),
+                              // The badge is 22 dp in the corner; its touch
+                              // region reaches 48 dp into the thumbnail.
                               Positioned(
-                                top: 4,
-                                right: 4,
-                                child: GestureDetector(
+                                top: 0,
+                                right: 0,
+                                child: TapTarget(
+                                  label: 'Remove image ${i + 1}',
+                                  alignment: Alignment.topRight,
                                   onTap: () =>
                                       chatProvider.removePendingImageAt(i),
-                                  child: Container(
+                                  child: Padding(
                                     padding: const EdgeInsets.all(4),
-                                    decoration: BoxDecoration(
-                                      color: Colors.black54,
-                                      borderRadius:
-                                          BorderRadius.circular(12),
-                                    ),
-                                    child: const Icon(
-                                      Icons.close,
-                                      size: 14,
-                                      color: Colors.white,
+                                    child: Container(
+                                      padding: const EdgeInsets.all(4),
+                                      decoration: BoxDecoration(
+                                        color: Colors.black54,
+                                        borderRadius:
+                                            BorderRadius.circular(12),
+                                      ),
+                                      child: const Icon(
+                                        Icons.close,
+                                        size: 14,
+                                        color: Colors.white,
+                                      ),
                                     ),
                                   ),
                                 ),
@@ -175,14 +250,15 @@ class _ChatInputState extends State<ChatInput> {
                   ),
                 ),
               // File preview
-              if (chatProvider.pendingFileName != null)
+              if (hasFile)
                 Padding(
-                  padding: const EdgeInsets.only(bottom: 9),
+                  padding: EdgeInsets.only(bottom: previewGap),
                   child: Align(
                     alignment: Alignment.centerLeft,
                     child: Container(
-                      padding: const EdgeInsets.symmetric(
-                          horizontal: 10, vertical: 7),
+                      // The remove button supplies the chip's height (48 dp
+                      // touch target, up from a 40 dp chip) and right edge.
+                      padding: const EdgeInsets.only(left: 10),
                       decoration: BoxDecoration(
                         border: Border.all(color: tokens.lineStrong),
                         borderRadius: BorderRadius.circular(9),
@@ -211,8 +287,8 @@ class _ChatInputState extends State<ChatInput> {
                               overflow: TextOverflow.ellipsis,
                             ),
                           ),
-                          const SizedBox(width: 8),
-                          GestureDetector(
+                          TapTarget(
+                            label: 'Remove file',
                             onTap: _clearFile,
                             child: Icon(Icons.close,
                                 size: 16, color: tokens.textFaint),
@@ -223,59 +299,57 @@ class _ChatInputState extends State<ChatInput> {
                   ),
                 ),
               // Feature chips
-              if (hasThinking || showSearchChip)
-                Padding(
-                  padding: const EdgeInsets.only(bottom: 9),
-                  child: Align(
-                    alignment: Alignment.centerLeft,
-                    child: Wrap(
-                      spacing: 7,
-                      runSpacing: 7,
-                      children: [
-                        if (hasThinking)
-                          _FeatureChip(
-                            icon: Icons.psychology_outlined,
-                            label: 'Think',
-                            active: thinkingOn,
-                            level: thinkingOn
-                                ? (conversation.thinkingLevel ??
-                                    (levelsOnly ? 'medium' : 'auto'))
-                                : null,
-                            onTap: () {
-                              HapticFeedback.selectionClick();
-                              if (levelsOnly) {
-                                _cycleThinkingLevel(conversation, levelsOnly);
-                              } else {
-                                conversation.thinkingEnabled = !thinkingOn;
-                                // Persisted like every other conversation
-                                // setting, not just until the next rebuild.
-                                context
-                                    .read<ChatProvider>()
-                                    .conversationSettingsChanged();
-                              }
-                            },
-                            onLevelTap: () => _cycleThinkingLevel(
-                                conversation, levelsOnly),
-                          ),
-                        if (showSearchChip)
-                          _FeatureChip(
-                            icon: Icons.public,
-                            label: 'Search',
-                            active: conversation.webSearchEnabled,
-                            onTap: () {
-                              HapticFeedback.selectionClick();
-                              conversation.webSearchEnabled =
-                                  !conversation.webSearchEnabled;
+              if (hasChips)
+                Align(
+                  alignment: Alignment.centerLeft,
+                  child: Wrap(
+                    spacing: 7,
+                    children: [
+                      if (hasThinking)
+                        _FeatureChip(
+                          icon: Icons.psychology_outlined,
+                          label: 'Think',
+                          active: thinkingOn,
+                          level: thinkingOn
+                              ? (conversation.thinkingLevel ??
+                                  (levelsOnly ? 'medium' : 'auto'))
+                              : null,
+                          onTap: () {
+                            HapticFeedback.selectionClick();
+                            if (levelsOnly) {
+                              _cycleThinkingLevel(conversation, levelsOnly);
+                            } else {
+                              conversation.thinkingEnabled = !thinkingOn;
+                              // Persisted like every other conversation
+                              // setting, not just until the next rebuild.
                               context
                                   .read<ChatProvider>()
                                   .conversationSettingsChanged();
-                            },
-                          ),
-                      ],
-                    ),
+                            }
+                          },
+                          onLevelTap: () =>
+                              _cycleThinkingLevel(conversation, levelsOnly),
+                        ),
+                      if (showSearchChip)
+                        _FeatureChip(
+                          icon: Icons.public,
+                          label: 'Search',
+                          active: conversation.webSearchEnabled,
+                          onTap: () {
+                            HapticFeedback.selectionClick();
+                            conversation.webSearchEnabled =
+                                !conversation.webSearchEnabled;
+                            context
+                                .read<ChatProvider>()
+                                .conversationSettingsChanged();
+                          },
+                        ),
+                    ],
                   ),
                 ),
-              // Input bar
+              // Input bar. Its buttons are 48 dp touch targets with the
+              // 38 dp visuals centered in them, so the old 5 dp padding now
+              // lives inside their hit areas.
               AnimatedContainer(
                 duration: const Duration(milliseconds: 150),
                 decoration: BoxDecoration(
@@ -285,80 +359,98 @@ class _ChatInputState extends State<ChatInput> {
                     color: _focusNode.hasFocus ? colors.primary : tokens.line,
                   ),
                 ),
-                padding: const EdgeInsets.fromLTRB(4, 5, 5, 5),
                 child: Row(
                   crossAxisAlignment: CrossAxisAlignment.end,
                   children: [
                     if (hasVision)
                       _BarIconButton(
                         icon: Icons.image_outlined,
+                        tooltip: 'Attach image',
                         color: tokens.textMuted,
                         onTap: _pickImage,
                       ),
                     _BarIconButton(
                       icon: Icons.attach_file_rounded,
+                      tooltip: 'Attach file',
                       color: tokens.textMuted,
                       onTap: _pickFile,
                     ),
                     Expanded(
-                      child: TextField(
-                        controller: _controller,
-                        focusNode: _focusNode,
-                        maxLines: 4,
-                        minLines: 1,
-                        style: const TextStyle(fontSize: 15, height: 1.4),
-                        decoration: InputDecoration(
-                          hintText: 'Message ${conversation.model}…',
-                          // A long model name must not wrap the empty field
-                          // to several lines.
-                          hintMaxLines: 1,
-                          hintStyle: TextStyle(
-                            color: tokens.textFaint,
-                            overflow: TextOverflow.ellipsis,
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(vertical: 1.5),
+                        child: TextField(
+                          controller: _controller,
+                          focusNode: _focusNode,
+                          maxLines: 4,
+                          minLines: 1,
+                          style: const TextStyle(fontSize: 15, height: 1.4),
+                          decoration: InputDecoration(
+                            hintText: 'Message ${conversation.model}…',
+                            // A long model name must not wrap the empty field
+                            // to several lines.
+                            hintMaxLines: 1,
+                            hintStyle: TextStyle(
+                              color: tokens.textFaint,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                            filled: false,
+                            border: InputBorder.none,
+                            enabledBorder: InputBorder.none,
+                            focusedBorder: InputBorder.none,
+                            isDense: true,
+                            // 48 dp tall with one line, like the touch
+                            // targets beside it.
+                            constraints:
+                                const BoxConstraints(minHeight: 48),
+                            contentPadding: const EdgeInsets.symmetric(
+                                horizontal: 1, vertical: 13.5),
                           ),
-                          filled: false,
-                          border: InputBorder.none,
-                          enabledBorder: InputBorder.none,
-                          focusedBorder: InputBorder.none,
-                          isDense: true,
-                          contentPadding: const EdgeInsets.symmetric(
-                              horizontal: 6, vertical: 10),
+                          textAlignVertical: TextAlignVertical.center,
+                          textInputAction: TextInputAction.send,
+                          onChanged: (text) {
+                            final id = _fieldConversationId;
+                            if (id != null) {
+                              chatProvider.setComposerText(id, text);
+                            }
+                          },
+                          onSubmitted: (_) => _send(chatProvider),
                         ),
-                        textInputAction: TextInputAction.send,
-                        onSubmitted: (_) => _send(chatProvider),
                       ),
                     ),
-                    const SizedBox(width: 4),
-                    SizedBox(
-                      width: 38,
-                      height: 38,
-                      child: Material(
-                        // Dimmed while a different chat is generating —
-                        // only one stream can run at a time.
-                        color: busyElsewhere
-                            ? colors.primary.withValues(alpha: 0.3)
-                            : colors.primary,
-                        borderRadius:
-                            BorderRadius.circular(tokens.radius - 5),
-                        child: InkWell(
+                    IconButton.filled(
+                      tooltip: chatProvider.isStreaming
+                          ? 'Stop generating'
+                          : 'Send message',
+                      iconSize: 20,
+                      // Dimmed while a different chat is generating — only
+                      // one stream can run at a time.
+                      onPressed: chatProvider.isStreaming
+                          ? () {
+                              HapticFeedback.lightImpact();
+                              chatProvider.stopStreaming();
+                            }
+                          : busyElsewhere
+                              ? null
+                              : () => _send(chatProvider),
+                      style: IconButton.styleFrom(
+                        fixedSize: const Size.square(38),
+                        minimumSize: const Size.square(38),
+                        padding: EdgeInsets.zero,
+                        tapTargetSize: MaterialTapTargetSize.padded,
+                        backgroundColor: colors.primary,
+                        foregroundColor: colors.onPrimary,
+                        disabledBackgroundColor:
+                            colors.primary.withValues(alpha: 0.3),
+                        disabledForegroundColor: colors.onPrimary,
+                        shape: RoundedRectangleBorder(
                           borderRadius:
                               BorderRadius.circular(tokens.radius - 5),
-                          onTap: chatProvider.isStreaming
-                              ? () {
-                                  HapticFeedback.lightImpact();
-                                  chatProvider.stopStreaming();
-                                }
-                              : busyElsewhere
-                                  ? null
-                                  : () => _send(chatProvider),
-                          child: Icon(
-                            chatProvider.isStreaming
-                                ? Icons.stop_rounded
-                                : Icons.arrow_upward_rounded,
-                            color: colors.onPrimary,
-                            size: 20,
-                          ),
                         ),
+                      ),
+                      icon: Icon(
+                        chatProvider.isStreaming
+                            ? Icons.stop_rounded
+                            : Icons.arrow_upward_rounded,
                       ),
                     ),
                   ],
@@ -421,9 +513,9 @@ class _ChatInputState extends State<ChatInput> {
         () async {
           final file = await _picker.pickImage(
             source: ImageSource.camera,
-            maxWidth: 1024,
-            maxHeight: 1024,
-            imageQuality: 85,
+            maxWidth: maxPickedImageDimension,
+            maxHeight: maxPickedImageDimension,
+            imageQuality: pickedImageQuality,
           );
           if (file == null) return null; // cancelled
           return base64Encode(await file.readAsBytes());
@@ -437,9 +529,9 @@ class _ChatInputState extends State<ChatInput> {
         'and try again.',
         () async {
           final files = await _picker.pickMultiImage(
-            maxWidth: 1024,
-            maxHeight: 1024,
-            imageQuality: 85,
+            maxWidth: maxPickedImageDimension,
+            maxHeight: maxPickedImageDimension,
+            imageQuality: pickedImageQuality,
           );
           return [
             for (final file in files) base64Encode(await file.readAsBytes()),
@@ -461,9 +553,21 @@ class _ChatInputState extends State<ChatInput> {
     final picked = await guardPicker<PlatformFile?>(
       messenger,
       "Couldn't open the file picker.",
-      () => FilePicker.pickFile(),
+      widget.filePicker ?? () => FilePicker.pickFile(),
     );
-    final pickedBytes = picked == null ? null : await readPickedFile(picked);
+    if (picked == null) return; // cancelled, or already reported
+    final isImage = _isImageExtension(picked.extension);
+    final limit = isImage ? maxImageAttachmentBytes : maxTextAttachmentBytes;
+
+    // Ask for the size before reading: loading a huge file into memory just
+    // to refuse it would be the very problem the limit is there to avoid.
+    final knownSize = await pickedFileSize(picked);
+    if (knownSize != null && knownSize > limit) {
+      _showTooLarge(messenger, image: isImage);
+      return;
+    }
+
+    final pickedBytes = await readPickedFile(picked);
     switch (classifyPickedFile(picked, pickedBytes)) {
       case PickedFileStatus.cancelled:
         return;
@@ -477,10 +581,15 @@ class _ChatInputState extends State<ChatInput> {
       case PickedFileStatus.ok:
         break;
     }
-    final f = picked!;
+    final f = picked;
     final bytes = pickedBytes!;
+    // The picker couldn't say how big it was; now we know.
+    if (bytes.length > limit) {
+      _showTooLarge(messenger, image: isImage);
+      return;
+    }
 
-    if (_isImageExtension(f.extension)) {
+    if (isImage) {
       // Images go through Ollama's images field — vision models only.
       final caps = conversation != null
           ? modelProvider.getCapabilities(conversation.model)
@@ -511,6 +620,14 @@ class _ChatInputState extends State<ChatInput> {
     final encoded = base64Encode(bytes);
     final mime = _mimeFromExtension(f.extension);
     chatProvider.setPendingFile(f.name, encoded, mime);
+  }
+
+  void _showTooLarge(ScaffoldMessengerState messenger,
+      {required bool image}) {
+    messenger
+      ..clearSnackBars()
+      ..showSnackBar(
+          SnackBar(content: Text(attachmentTooLargeMessage(image: image))));
   }
 
   static bool _isImageExtension(String? ext) {
@@ -588,6 +705,7 @@ class _ChatInputState extends State<ChatInput> {
     }
     HapticFeedback.lightImpact();
     _controller.clear();
+    if (conversation != null) chatProvider.setComposerText(conversation.id, '');
     chatProvider.sendMessage(text, capabilities: caps);
   }
 }
@@ -685,76 +803,122 @@ class _FeatureChip extends StatelessWidget {
     final tokens = theme.extension<DiscoTokens>()!;
     final fg = active ? colors.primary : tokens.textMuted;
 
-    return GestureDetector(
+    // The pill stays ~30 dp tall; the 48 dp touch region around it is
+    // transparent. The effort badge is a second, smaller touch target inside
+    // the pill, so screen readers reach it as an action of the chip instead
+    // of as a node too small to hit.
+    return Semantics(
+      button: true,
+      selected: active,
+      label: label,
+      value: level,
       onTap: onTap,
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 150),
-        padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 6),
-        decoration: BoxDecoration(
-          color: active
-              ? colors.primary.withValues(alpha: 0.13)
-              : Colors.transparent,
-          borderRadius: BorderRadius.circular(999),
-          border: Border.all(color: active ? colors.primary : tokens.line),
-        ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(icon, size: 15, color: fg),
-            const SizedBox(width: 6),
-            Text(label, style: TextStyle(fontSize: 12.5, color: fg)),
-            if (level != null) ...[
-              const SizedBox(width: 7),
-              GestureDetector(
-                onTap: onLevelTap,
-                behavior: HitTestBehavior.opaque,
-                child: Container(
-                  padding: const EdgeInsets.only(left: 7),
-                  decoration: BoxDecoration(
-                    border: Border(left: BorderSide(color: fg, width: 1)),
-                  ),
-                  child: Text(
-                    level!.toUpperCase(),
-                    style: AppTheme.mono(
-                      fontSize: 9.5,
-                      letterSpacing: 0.4,
-                      color: fg,
+      customSemanticsActions: {
+        if (level != null && onLevelTap != null)
+          const CustomSemanticsAction(label: 'Change thinking effort'):
+              onLevelTap!,
+      },
+      excludeSemantics: true,
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(
+            minWidth: kTapTargetSize, minHeight: kTapTargetSize),
+        child: GestureDetector(
+          onTap: onTap,
+          excludeFromSemantics: true,
+          behavior: HitTestBehavior.opaque,
+          child: Align(
+            widthFactor: 1,
+            heightFactor: 1,
+            child: AnimatedContainer(
+              duration: const Duration(milliseconds: 150),
+              padding: EdgeInsets.only(left: 11, right: level != null ? 0 : 11),
+              decoration: BoxDecoration(
+                color: active
+                    ? colors.primary.withValues(alpha: 0.13)
+                    : Colors.transparent,
+                borderRadius: BorderRadius.circular(999),
+                border:
+                    Border.all(color: active ? colors.primary : tokens.line),
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 6),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(icon, size: 15, color: fg),
+                        const SizedBox(width: 6),
+                        Text(label,
+                            style: TextStyle(fontSize: 12.5, color: fg)),
+                      ],
                     ),
                   ),
-                ),
+                  if (level != null)
+                    GestureDetector(
+                      onTap: onLevelTap,
+                      excludeFromSemantics: true,
+                      behavior: HitTestBehavior.opaque,
+                      // The padding is the badge's touch region: it runs to
+                      // the pill's full height and right edge.
+                      child: Padding(
+                        padding: const EdgeInsets.fromLTRB(7, 6, 11, 6),
+                        child: Container(
+                          padding: const EdgeInsets.only(left: 7),
+                          decoration: BoxDecoration(
+                            border:
+                                Border(left: BorderSide(color: fg, width: 1)),
+                          ),
+                          child: Text(
+                            level!.toUpperCase(),
+                            style: AppTheme.mono(
+                              fontSize: 9.5,
+                              letterSpacing: 0.4,
+                              color: fg,
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                ],
               ),
-            ],
-          ],
+            ),
+          ),
         ),
       ),
     );
   }
 }
 
+/// A 38 dp icon button inside a 48 dp touch target ([IconButton]'s padded
+/// tap target keeps the visual and the layout separate).
 class _BarIconButton extends StatelessWidget {
   final IconData icon;
+  final String tooltip;
   final Color color;
   final VoidCallback onTap;
 
   const _BarIconButton({
     required this.icon,
+    required this.tooltip,
     required this.color,
     required this.onTap,
   });
 
   @override
   Widget build(BuildContext context) {
-    return SizedBox(
-      width: 38,
-      height: 38,
-      child: Material(
-        color: Colors.transparent,
-        borderRadius: BorderRadius.circular(11),
-        child: InkWell(
-          borderRadius: BorderRadius.circular(11),
-          onTap: onTap,
-          child: Icon(icon, color: color, size: 20),
-        ),
+    return IconButton(
+      tooltip: tooltip,
+      iconSize: 20,
+      icon: Icon(icon, color: color),
+      onPressed: onTap,
+      style: IconButton.styleFrom(
+        fixedSize: const Size.square(38),
+        minimumSize: const Size.square(38),
+        padding: EdgeInsets.zero,
+        tapTargetSize: MaterialTapTargetSize.padded,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(11)),
       ),
     );
   }
