@@ -120,4 +120,4 @@ test/            # Unit tests, widget tests, screen tests
 
 ## Note on Commit History
 
-The repository was created partway through development, so the early design and prototyping work is not reflected in the commit history. Active development ran from late 2024; commits start from February 2026.
+The repository was created partway through development, so the early design and prototyping work is not reflected in the commit history. Active development ran from late 2025; commits start from February 2026.
